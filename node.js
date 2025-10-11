@@ -1,150 +1,96 @@
-// ===== EAGLENODE24x7 Discord + Minecraft Bot =====
-const { Client, GatewayIntentBits, SlashCommandBuilder, Routes, REST } = require("discord.js");
-const mineflayer = require("mineflayer");
+// EAGLENODE24x7 Discord → Minecraft logger
+// Uses Discord.js v14 and Mineflayer
+// Checks if IP:port are online before connecting
 
-const TOKEN = "YOUR_DISCORD_BOT_TOKEN"; // 🔒 Replace with your Discord bot token
-const CLIENT_ID = "YOUR_CLIENT_ID"; // Discord Application ID
-const GUILD_ID = "YOUR_GUILD_ID"; // Discord Server ID (right-click your server → Copy ID)
+import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
+import mineflayer from "mineflayer";
+import net from "net";
+import dotenv from "dotenv";
+dotenv.config();
 
-let mcBot = null; // Bot for control commands
-let chatLogger = null; // Bot for chat logging
+// ---- Discord setup ----
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
 
-// === Create Discord client ===
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
-});
-
-// === Slash command definitions ===
+// ---- Slash command registration ----
 const commands = [
   new SlashCommandBuilder()
-    .setName("botcommand")
-    .setDescription("Control your Minecraft bot EAGLENODE24x7")
-    .addStringOption(opt =>
-      opt.setName("action")
-        .setDescription("Choose an action")
-        .setRequired(true)
-        .addChoices(
-          { name: "join", value: "join" },
-          { name: "leave", value: "leave" },
-          { name: "say", value: "say" },
-          { name: "creative", value: "creative" },
-          { name: "survival", value: "survival" }
-        )
-    )
-    .addStringOption(opt =>
-      opt.setName("message")
-        .setDescription("Message to send (only for 'say')")
-    ),
-
-  new SlashCommandBuilder()
     .setName("logserverchat")
-    .setDescription("Connect to a Minecraft server and log chat to this channel")
+    .setDescription("Connect the bot to a Minecraft server and log its chat.")
     .addStringOption(opt =>
       opt.setName("ip")
-        .setDescription("Server IP (e.g. eaglenode24x7.aternos.me)")
-        .setRequired(true)
-    )
+        .setDescription("Minecraft server IP")
+        .setRequired(true))
     .addIntegerOption(opt =>
       opt.setName("port")
-        .setDescription("Server port (default 25565)")
-        .setRequired(true)
-    )
+        .setDescription("Server port")
+        .setRequired(true))
 ].map(cmd => cmd.toJSON());
 
-// === Register commands ===
 const rest = new REST({ version: "10" }).setToken(TOKEN);
-(async () => {
-  try {
-    console.log("🔧 Registering slash commands...");
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log("✅ Commands registered!");
-  } catch (err) {
-    console.error("❌ Command registration failed:", err);
-  }
-})();
+await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+console.log("✅ /logserverchat command registered!");
 
-// === Spawn main Minecraft bot ===
-function spawnBot() {
-  mcBot = mineflayer.createBot({
-    host: "YOUR_SERVER_IP", // e.g. eaglenode24x7.aternos.me
-    port: 25565,
-    username: "EAGLENODE24x7"
+// ---- Utility: check if IP:port is reachable ----
+function checkServer(ip, port, timeout = 4000) {
+  return new Promise(resolve => {
+    const socket = new net.Socket();
+    const onError = () => {
+      socket.destroy();
+      resolve(false);
+    };
+    socket.setTimeout(timeout);
+    socket.once("error", onError);
+    socket.once("timeout", onError);
+    socket.connect(port, ip, () => {
+      socket.end();
+      resolve(true);
+    });
   });
-
-  mcBot.on("login", () => console.log("✅ EAGLENODE24x7 joined Minecraft server"));
-  mcBot.on("end", () => console.log("⚠️ Bot disconnected"));
-  mcBot.on("error", err => console.log("❌ Error:", err.message));
 }
 
-// === Command handler ===
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isCommand()) return;
-
-  // /botcommand
-  if (interaction.commandName === "botcommand") {
-    const action = interaction.options.getString("action");
-    const message = interaction.options.getString("message");
-
-    switch (action) {
-      case "join":
-        if (mcBot) return interaction.reply("⚠️ Bot already online!");
-        spawnBot();
-        return interaction.reply("✅ EAGLENODE24x7 joining Minecraft server...");
-      case "leave":
-        if (!mcBot) return interaction.reply("❌ Bot not online!");
-        mcBot.quit("Left by command");
-        mcBot = null;
-        return interaction.reply("👋 Bot left the server.");
-      case "say":
-        if (!mcBot) return interaction.reply("❌ Bot not connected!");
-        mcBot.chat(message || "");
-        return interaction.reply(`💬 Bot said: "${message}"`);
-      case "creative":
-        if (!mcBot) return interaction.reply("❌ Bot not connected!");
-        mcBot.chat("/gamemode creative EAGLENODE24x7");
-        return interaction.reply("🎨 Bot changed to Creative mode.");
-      case "survival":
-        if (!mcBot) return interaction.reply("❌ Bot not connected!");
-        mcBot.chat("/gamemode survival EAGLENODE24x7");
-        return interaction.reply("🟢 Bot changed to Survival mode.");
-    }
-  }
-
-  // /logserverchat
+// ---- Discord command handler ----
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === "logserverchat") {
     const ip = interaction.options.getString("ip");
     const port = interaction.options.getInteger("port");
-    const channel = interaction.channel;
 
-    await interaction.reply(`📡 Connecting to **${ip}:${port}** to log chat...`);
+    await interaction.reply(`🔍 Checking server **${ip}:${port}** ...`);
 
-    if (chatLogger) {
-      try { chatLogger.quit(); } catch {}
-      chatLogger = null;
+    const online = await checkServer(ip, port);
+    if (!online) {
+      await interaction.followUp("🔴 Server offline or invalid — please check IP and port.");
+      return;
     }
 
-    chatLogger = mineflayer.createBot({
+    await interaction.followUp("🟢 Server online — connecting now...");
+
+    const mcBot = mineflayer.createBot({
       host: ip,
       port: port,
       username: "EAGLENODE24x7"
     });
 
-    chatLogger.on("login", () => channel.send(`✅ Connected to **${ip}:${port}**`));
-    chatLogger.on("chat", (username, message) => {
-      if (username !== chatLogger.username) {
-        channel.send(`💬 **${username}:** ${message}`);
-      }
+    mcBot.once("login", () => {
+      interaction.followUp("✅ Connected to Minecraft server!");
     });
-    chatLogger.on("end", () => {
-      channel.send("⚠️ Disconnected — retrying in 10 seconds...");
-      setTimeout(() => {
-        try { chatLogger.connect(); } catch (err) {
-          channel.send("❌ Reconnect failed: " + err.message);
-        }
-      }, 10000);
+
+    mcBot.on("chat", (username, message) => {
+      interaction.channel.send(`💬 **${username}:** ${message}`);
     });
-    chatLogger.on("error", err => channel.send("❌ Error: " + err.message));
+
+    mcBot.on("end", () => {
+      interaction.channel.send("⚠️ Minecraft bot disconnected.");
+    });
+
+    mcBot.on("error", err => {
+      interaction.channel.send(`❌ Minecraft bot error: ${err.message}`);
+    });
   }
 });
 
+client.once("ready", () => console.log(`🤖 Logged in as ${client.user.tag}`));
 client.login(TOKEN);
