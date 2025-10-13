@@ -62,7 +62,6 @@ def os_type_to_display_name(os_type):
 # ========================
 # ADMIN COMMANDS
 # ========================
-
 @bot.tree.command(name="deploy", description="🚀 Admin: Deploy a new VPS instance for a user")
 @app_commands.describe(
     user="Select the user to assign the VPS to",
@@ -76,21 +75,32 @@ async def deploy_command(interaction: discord.Interaction, user: discord.User, o
         return
 
     await interaction.response.defer()
+
+    # Safe limits
+    ram = max(1, min(ram, 16))
+    cpu = max(1, min(cpu, 8))
+
     container_name = f"VPS_{user.name}_{generate_random_string()}"
     image = get_docker_image_for_os(os)
 
     try:
+        subprocess.call(["docker", "pull", image])
+
         container_id = subprocess.check_output([
             "docker", "run", "-itd", "--privileged", "--cap-add=ALL",
-            f"--memory={ram}g", f"--cpus={cpu}", "--hostname", "eaglenode",
+            f"--memory={ram}G", f"--cpus={cpu}", "--hostname", "eaglenode",
             "--name", container_name, image
         ]).decode().strip()
 
         await interaction.followup.send("⏳ Setting up your VPS, please wait...", ephemeral=True)
+
         install_cmd = "apt update -y && apt install git sudo neofetch docker.io unzip tmate dropbear docker-compose -y && dropbear -p 22"
         subprocess.call(["docker", "exec", "-i", container_name, "bash", "-c", install_cmd])
 
-        exec_cmd = await asyncio.create_subprocess_exec("docker", "exec", container_name, "tmate", "-F", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        exec_cmd = await asyncio.create_subprocess_exec(
+            "docker", "exec", container_name, "tmate", "-F",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
         ssh_line = await capture_ssh_session_line(exec_cmd)
 
         if ssh_line:
@@ -131,6 +141,47 @@ async def delete_user_container(interaction: discord.Interaction, container_id: 
     except subprocess.CalledProcessError:
         await interaction.followup.send(f"❌ Failed to delete `{container_id}` — check container name.", ephemeral=True)
 
+@bot.tree.command(name="manage_vps", description="🧩 Manage a VPS container by ID or name")
+@app_commands.describe(container_id="Enter the Docker container ID or name")
+async def manage_vps(interaction: discord.Interaction, container_id: str):
+    """Admin: View and manage a specific VPS container"""
+    if not is_admin(interaction.user.id):
+        await interaction.response.send_message("❌ Only admins can use this command.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        status = subprocess.check_output(
+            ["docker", "inspect", "-f", "{{.State.Status}}", container_id],
+            stderr=subprocess.STDOUT
+        ).decode().strip()
+
+        stats = subprocess.getoutput(
+            f"docker stats {container_id} --no-stream --format 'CPU: {{.CPUPerc}} | MEM: {{.MemUsage}}'"
+        )
+
+        embed = discord.Embed(
+            title=f"🧩 Manage VPS — {container_id}",
+            color=0x2400ff,
+            description=f"**Status:** `{status}`\n**Usage:** `{stats}`"
+        )
+        embed.add_field(
+            name="⚙️ Management Commands",
+            value=(
+                "▶️ `/start container_id:` — Start this VPS\n"
+                "⏹️ `/stop container_id:` — Stop this VPS\n"
+                "🔁 `/restart container_id:` — Restart this VPS\n"
+                "♻️ `/regen-ssh container_id:` — Regenerate SSH session\n"
+                "🗑️ `/delete-user-container container_id:` — Delete this VPS"
+            ),
+            inline=False
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except subprocess.CalledProcessError:
+        await interaction.followup.send("❌ Container not found or Docker error.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Unexpected error: {e}", ephemeral=True)
+
 @bot.tree.command(name="list-all", description="🌍 Admin: Show all VPS instances")
 async def list_all_command(interaction: discord.Interaction):
     if not is_admin(interaction.user.id):
@@ -155,7 +206,6 @@ async def list_all_command(interaction: discord.Interaction):
 # ========================
 # USER COMMANDS
 # ========================
-
 @bot.tree.command(name="list", description="🌐 Show your VPS instances")
 async def list_user_vps(interaction: discord.Interaction):
     vps_list = get_user_containers(str(interaction.user))
@@ -212,49 +262,6 @@ async def remove_vps(interaction: discord.Interaction, container_id: str):
     except:
         await interaction.followup.send("❌ Error removing VPS.", ephemeral=True)
 
-@bot.tree.command(name="resources", description="⚙️ Show your VPS resource usage")
-async def resources_command(interaction: discord.Interaction):
-    vps_list = get_user_containers(str(interaction.user))
-    if not vps_list:
-        await interaction.response.send_message("📂 You don’t have any VPS instances.", ephemeral=True)
-        return
-
-    embed = discord.Embed(title="⚙️ VPS Resources", color=0x2400ff)
-    for _, cname, *_ in vps_list:
-        try:
-            stats = subprocess.check_output(["docker", "stats", cname, "--no-stream", "--format", "{{.CPUPerc}} | {{.MemUsage}}"]).decode().strip()
-            embed.add_field(name=cname, value=f"Usage: {stats}", inline=False)
-        except:
-            embed.add_field(name=cname, value="❌ Unable to fetch stats", inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="restart", description="🔁 Restart your VPS")
-@app_commands.describe(container_id="Enter your container ID or name")
-async def restart_vps(interaction: discord.Interaction, container_id: str):
-    try:
-        subprocess.check_call(["docker", "restart", container_id])
-        await interaction.response.send_message(f"🔁 VPS `{container_id}` restarted successfully.", ephemeral=True)
-    except:
-        await interaction.response.send_message("❌ Failed to restart VPS.", ephemeral=True)
-
-@bot.tree.command(name="start", description="▶️ Start your VPS")
-@app_commands.describe(container_id="Enter your container ID or name")
-async def start_vps(interaction: discord.Interaction, container_id: str):
-    try:
-        subprocess.check_call(["docker", "start", container_id])
-        await interaction.response.send_message(f"▶️ VPS `{container_id}` started successfully.", ephemeral=True)
-    except:
-        await interaction.response.send_message("❌ Failed to start VPS.", ephemeral=True)
-
-@bot.tree.command(name="stop", description="⏹️ Stop your VPS")
-@app_commands.describe(container_id="Enter your container ID or name")
-async def stop_vps(interaction: discord.Interaction, container_id: str):
-    try:
-        subprocess.check_call(["docker", "stop", container_id])
-        await interaction.response.send_message(f"⏹️ VPS `{container_id}` stopped successfully.", ephemeral=True)
-    except:
-        await interaction.response.send_message("❌ Failed to stop VPS.", ephemeral=True)
-
 # ========================
 # BASIC COMMANDS
 # ========================
@@ -268,14 +275,11 @@ async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🪐 EAGLE NODE | Help Menu", color=0x2400ff)
     embed.add_field(name="🚀 /deploy", value="Admin — Deploy VPS", inline=False)
     embed.add_field(name="🗑️ /delete-user-container", value="Admin — Delete VPS", inline=False)
+    embed.add_field(name="🧩 /manage_vps", value="Admin — Manage VPS info", inline=False)
     embed.add_field(name="🌍 /list-all", value="Admin — Show all VPS", inline=False)
     embed.add_field(name="🌐 /list", value="Show your VPS list", inline=False)
     embed.add_field(name="♻️ /regen-ssh", value="Regenerate SSH link", inline=False)
     embed.add_field(name="🗑️ /remove", value="Delete your VPS", inline=False)
-    embed.add_field(name="⚙️ /resources", value="Check VPS resources", inline=False)
-    embed.add_field(name="🔁 /restart", value="Restart VPS", inline=False)
-    embed.add_field(name="▶️ /start", value="Start VPS", inline=False)
-    embed.add_field(name="⏹️ /stop", value="Stop VPS", inline=False)
     embed.add_field(name="🏓 /ping", value="Check bot latency", inline=False)
     embed.set_footer(text="💫 Powered by EAGLE NODE | Secure VPS Hosting")
     await interaction.response.send_message(embed=embed, ephemeral=True)
