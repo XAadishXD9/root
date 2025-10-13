@@ -294,7 +294,7 @@ async def on_ready():
             instance_count = len(open(database_file).readlines()) if os.path.exists(database_file) else 0
             status = f"Watching 💫 EAGLE NODE {instance_count} VPS"
             await bot.change_presence(activity=discord.Game(name=status))
-            await asyncio.sleep(30)
+            await asyncio.sleep(2)
 
     bot.loop.create_task(update_status())
 
