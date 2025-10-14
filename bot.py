@@ -7,12 +7,14 @@ import random
 import string
 import os
 from datetime import datetime
+import psutil
 
 # ========================
 # CONFIG
 # ========================
 TOKEN = ""  # <-- your bot token
-ADMIN_IDS = [1405778722732376176]  # <-- your Discord ID
+ADMIN_IDS = [1405778722732376176]  # <-- existing admin Discord ID
+ADMIN_NAMES = ["Anant Ram"]  # <-- added by request
 database_file = "database.txt"
 PUBLIC_IP = "138.68.79.95"
 
@@ -25,8 +27,13 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 # ========================
 # HELPERS
 # ========================
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
+def is_admin(user_id, user_name=None):
+    """Check if a user is an admin either by ID or name."""
+    if user_id in ADMIN_IDS:
+        return True
+    if user_name and any(name.lower() in user_name.lower() for name in ADMIN_NAMES):
+        return True
+    return False
 
 def generate_random_string(length=6):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
@@ -66,19 +73,37 @@ def os_type_to_display_name(os_type):
 @app_commands.describe(
     user="Select the user to assign the VPS to",
     os="Operating system (ubuntu or debian)",
-    ram="RAM in GB (0 = no limit)",
-    cpu="CPU cores (0 = no limit)"
+    ram="RAM in GB (0 = auto)",
+    cpu="CPU cores (0 = auto)"
 )
 async def deploy_command(interaction: discord.Interaction, user: discord.User, os: str, ram: int, cpu: int):
-    if not is_admin(interaction.user.id):
+    if not is_admin(interaction.user.id, interaction.user.name):
         await interaction.response.send_message("❌ Only admins can use this command.", ephemeral=True)
         return
 
     await interaction.response.defer()
 
-    # Safe default limits (avoid negative or nonsense values)
-    ram = max(0, ram)
-    cpu = max(0, cpu)
+    # Detect host system specs
+    total_ram_gb = int(psutil.virtual_memory().total / (1024 ** 3))
+    total_cpus = os.cpu_count() or 1
+
+    # Smart automatic allocation based on host specs
+    if total_ram_gb <= 4:
+        default_ram, default_cpu = 1, 1
+    elif total_ram_gb <= 8:
+        default_ram, default_cpu = 2, 2
+    elif total_ram_gb <= 16:
+        default_ram, default_cpu = 4, 3
+    elif total_ram_gb <= 32:
+        default_ram, default_cpu = 8, 4
+    else:
+        default_ram, default_cpu = 16, 8
+
+    # Apply defaults if input is zero or too high
+    if ram <= 0 or ram > total_ram_gb:
+        ram = default_ram
+    if cpu <= 0 or cpu > total_cpus:
+        cpu = default_cpu
 
     container_name = f"VPS_{user.name}_{generate_random_string()}"
     image = get_docker_image_for_os(os)
@@ -86,17 +111,13 @@ async def deploy_command(interaction: discord.Interaction, user: discord.User, o
     try:
         subprocess.call(["docker", "pull", image])
 
-        # Build docker command dynamically
-        docker_cmd = [
-            "docker", "run", "-itd", "--privileged", "--cap-add=ALL",
-            "--hostname", "eaglenode", "--name", container_name, image
-        ]
+        # Build docker command with correct flag order
+        docker_cmd = ["docker", "run", "-itd", "--privileged", "--cap-add=ALL"]
 
-        # Add resource limits only if not "infinite mode"
-        if ram > 0:
-            docker_cmd.insert(6, f"--memory={ram}G")
-        if cpu > 0:
-            docker_cmd.insert(7, f"--cpus={cpu}")
+        # Add safe limits (no infinite RAM/CPU here)
+        docker_cmd += [f"--memory={ram}G", f"--cpus={cpu}"]
+
+        docker_cmd += ["--hostname", "eaglenode", "--name", container_name, image]
 
         container_id = subprocess.check_output(docker_cmd).decode().strip()
 
@@ -118,8 +139,8 @@ async def deploy_command(interaction: discord.Interaction, user: discord.User, o
             add_to_database(str(user), container_name, ssh_line, ram, cpu, str(interaction.user), os_type_to_display_name(os))
             embed = discord.Embed(title="✅ VPS Created Successfully!", color=0x2400ff)
             embed.add_field(name="OS", value=os_type_to_display_name(os))
-            embed.add_field(name="RAM", value=f"{ram if ram > 0 else '∞'} GB")
-            embed.add_field(name="CPU", value=f"{cpu if cpu > 0 else '∞'} cores")
+            embed.add_field(name="RAM", value=f"{ram} GB")
+            embed.add_field(name="CPU", value=f"{cpu} cores")
             embed.add_field(name="SSH Command", value=f"```{ssh_line}```", inline=False)
             embed.add_field(name="Container Name", value=container_name)
             await user.send(embed=embed)
@@ -133,7 +154,7 @@ async def deploy_command(interaction: discord.Interaction, user: discord.User, o
 @bot.tree.command(name="delete-user-container", description="🗑️ Admin: Delete a user’s VPS container by ID or name")
 @app_commands.describe(container_id="Enter the Docker container ID or name")
 async def delete_user_container(interaction: discord.Interaction, container_id: str):
-    if not is_admin(interaction.user.id):
+    if not is_admin(interaction.user.id, interaction.user.name):
         await interaction.response.send_message("❌ Only admins can use this command.", ephemeral=True)
         return
 
@@ -164,25 +185,19 @@ async def list_all_command(interaction: discord.Interaction):
     with open(database_file, "r") as f:
         vps_lines = [line.strip().split("|") for line in f.readlines()]
 
-    # Admins can view all VPS
-    if is_admin(user_id):
+    # Admins see all VPS
+    if is_admin(user_id, username):
         embed = discord.Embed(title="🌍 All VPS Instances (Admin View)", color=0x2400ff)
         for user, cname, ssh, ram, cpu, creator, os_type in vps_lines:
             embed.add_field(
                 name=cname,
-                value=(
-                    f"👤 User: {user}\n"
-                    f"🧑‍💼 Creator: {creator}\n"
-                    f"💽 OS: {os_type}\n"
-                    f"🧠 RAM: {('∞' if ram == '0' else ram+'GB')} | ⚙️ CPU: {('∞' if cpu == '0' else cpu+' cores')}\n"
-                    f"🔐 SSH: `{ssh}`"
-                ),
+                value=f"👤 User: {user}\n🧑‍💼 Creator: {creator}\n💽 OS: {os_type}\n🧠 RAM: {ram}GB | ⚙️ CPU: {cpu} cores\n🔐 SSH: `{ssh}`",
                 inline=False
             )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    # Regular users can only view their own VPS
+    # Regular users see only their own VPS
     user_vps = [v for v in vps_lines if v[0] == username]
     if not user_vps:
         await interaction.response.send_message("📂 You don’t have any VPS instances.", ephemeral=True)
@@ -192,11 +207,7 @@ async def list_all_command(interaction: discord.Interaction):
     for user, cname, ssh, ram, cpu, creator, os_type in user_vps:
         embed.add_field(
             name=cname,
-            value=(
-                f"💽 OS: {os_type}\n"
-                f"🧠 RAM: {('∞' if ram == '0' else ram+'GB')} | ⚙️ CPU: {('∞' if cpu == '0' else cpu+' cores')}\n"
-                f"🔐 SSH: `{ssh}`"
-            ),
+            value=f"💽 OS: {os_type}\n🧠 RAM: {ram}GB | ⚙️ CPU: {cpu} cores\n🔐 SSH: `{ssh}`",
             inline=False
         )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -214,7 +225,7 @@ async def list_user_vps(interaction: discord.Interaction):
     for user, cname, ssh, ram, cpu, creator, os_type in vps_list:
         embed.add_field(
             name=cname,
-            value=f"OS: {os_type}\nRAM: {('∞' if ram == '0' else ram+'GB')} | CPU: {('∞' if cpu == '0' else cpu+' cores')}\nSSH: `{ssh}`",
+            value=f"OS: {os_type}\nRAM: {ram}GB | CPU: {cpu} cores\nSSH: `{ssh}`",
             inline=False
         )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -223,7 +234,7 @@ async def list_user_vps(interaction: discord.Interaction):
 @app_commands.describe(container_id="Enter your container ID or name")
 async def regen_ssh(interaction: discord.Interaction, container_id: str):
     vps_list = get_user_containers(str(interaction.user))
-    if not any(container_id in v for v in vps_list) and not is_admin(interaction.user.id):
+    if not any(container_id in v for v in vps_list) and not is_admin(interaction.user.id, interaction.user.name):
         await interaction.response.send_message("❌ You don't own this container.", ephemeral=True)
         return
 
@@ -242,7 +253,7 @@ async def regen_ssh(interaction: discord.Interaction, container_id: str):
 @app_commands.describe(container_id="Enter your container ID or name")
 async def remove_vps(interaction: discord.Interaction, container_id: str):
     vps_list = get_user_containers(str(interaction.user))
-    if not any(container_id in v for v in vps_list) and not is_admin(interaction.user.id):
+    if not any(container_id in v for v in vps_list) and not is_admin(interaction.user.id, interaction.user.name):
         await interaction.response.send_message("❌ You don't own this container.", ephemeral=True)
         return
 
@@ -271,9 +282,9 @@ async def ping_command(interaction: discord.Interaction):
 @bot.tree.command(name="help", description="📘 Show available commands")
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🪐 EAGLE NODE | Help Menu", color=0x2400ff)
-    embed.add_field(name="🚀 /deploy", value="Admin — Deploy VPS", inline=False)
+    embed.add_field(name="🚀 /deploy", value="Admin — Deploy VPS (auto RAM/CPU)", inline=False)
     embed.add_field(name="🗑️ /delete-user-container", value="Admin — Delete VPS", inline=False)
-    embed.add_field(name="🌍 /list-all", value="Show your VPS list (admins see all)", inline=False)
+    embed.add_field(name="🌍 /list-all", value="View VPS (only yours unless admin)", inline=False)
     embed.add_field(name="🌐 /list", value="Show your VPS list", inline=False)
     embed.add_field(name="♻️ /regen-ssh", value="Regenerate SSH link", inline=False)
     embed.add_field(name="🗑️ /remove", value="Delete your VPS", inline=False)
@@ -294,7 +305,7 @@ async def on_ready():
             instance_count = len(open(database_file).readlines()) if os.path.exists(database_file) else 0
             status = f"Watching 💫 EAGLE NODE {instance_count} VPS"
             await bot.change_presence(activity=discord.Game(name=status))
-            await asyncio.sleep(2)
+            await asyncio.sleep(30)
 
     bot.loop.create_task(update_status())
 
