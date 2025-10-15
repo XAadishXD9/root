@@ -101,12 +101,17 @@ async def deploy_command(interaction: discord.Interaction, user: discord.User, o
 
         await interaction.followup.send("⏳ Setting up your VPS, please wait...", ephemeral=True)
 
-        install_cmd = (
-            "apt update -y && apt install git sudo neofetch docker.io unzip "
-            "tmate dropbear docker-compose -y && dropbear -p 22"
-        )
-        subprocess.call(["docker", "exec", "-i", container_name, "bash", "-c", install_cmd])
+        # ===== FAST INSTALL SECTION =====
+        subprocess.call(["docker", "exec", "-i", container_name, "bash", "-c", """
+            apt-get update -y && \
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            tmate neofetch screen wget curl htop nano vim openssh-server sudo ufw git docker.io systemd systemd-sysv && \
+            apt-get clean && rm -rf /var/lib/apt/lists/* && \
+            systemctl enable ssh || true && \
+            service ssh start || systemctl start ssh
+        """])
 
+        # Start tmate session and capture SSH info
         exec_cmd = await asyncio.create_subprocess_exec(
             "docker", "exec", container_name, "tmate", "-F",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -129,7 +134,6 @@ async def deploy_command(interaction: discord.Interaction, user: discord.User, o
     except subprocess.CalledProcessError as e:
         await interaction.followup.send(f"❌ Docker error: {e}", ephemeral=True)
 
-
 @bot.tree.command(name="delete-user-container", description="🗑️ Admin: Delete a user’s VPS container")
 @app_commands.describe(container_id="Enter the container ID or name")
 async def delete_user_container(interaction: discord.Interaction, container_id: str):
@@ -151,7 +155,6 @@ async def delete_user_container(interaction: discord.Interaction, container_id: 
         await interaction.followup.send(f"✅ Deleted `{container_id}` and removed from database.", ephemeral=True)
     except subprocess.CalledProcessError:
         await interaction.followup.send(f"❌ Failed to delete `{container_id}`.", ephemeral=True)
-
 
 @bot.tree.command(name="list-all", description="🌍 Show all VPS instances (admin view)")
 async def list_all_command(interaction: discord.Interaction):
@@ -178,72 +181,6 @@ async def list_all_command(interaction: discord.Interaction):
         )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
-@bot.tree.command(name="plans", description="💎 Admin: Show VPS invite & boost rewards")
-async def plans_command(interaction: discord.Interaction):
-    if not is_admin(interaction.user.id):
-        await interaction.response.send_message("❌ Only admins can use this command.", ephemeral=True)
-        return
-
-    embed = discord.Embed(
-        title="💎 EAGLE NODE | VPS Invite & Boost Rewards",
-        description="Invite friends or boost the server to earn VPS hosting rewards!",
-        color=0x2400ff
-    )
-
-    embed.add_field(
-        name="📨 Invite Rewards",
-        value=(
-            "> 8x = 12GB / 4c / 100GB\n"
-            "> 12x = 24GB / 6c / 100GB\n"
-            "> 16x = 28GB / 6c / 150GB\n"
-            "> 20x = 32GB / 8c / 200GB\n"
-            "> 24x = 38GB / 8c / 250GB\n"
-            "> 28x = 42GB / 10c / 300GB\n"
-            "> 36x = 56GB / 10c / 350GB"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="🚀 Boost Rewards",
-        value=(
-            "> 2x Boost → 24GB RAM | 4 Cores | 100GB Disk\n"
-            "> 4x Boost → 48GB RAM | 6 Cores | 150GB Disk\n"
-            "> 6x Boost → 64GB RAM | 8 Cores | 200GB Disk"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="📢 Notice",
-        value=(
-            "> Invite rewards can be combined.\n"
-            "> No IPv4.\n"
-            "> Open a ticket in <#1406277896997175358> to claim.\n"
-            "> Only new invites.\n"
-            "> ||@everyone||"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="🦅 EAGLE NODE",
-        value=(
-            "===========================\n"
-            "⚙️ VPS Supports:\n"
-            "✅ Pterodactyl Panel\n✅ Docker 🐳\n✅ Wings 🪽\n✅ Proxmox 🖥️\n\n"
-            "⛔ Not Allowed:\n🚫 Crypto Mining\n🚫 QumY\n\n"
-            "⚠️ If you do this, your VPS will be suspended immediately!"
-        ),
-        inline=False
-    )
-
-    embed.set_image(url="https://cdn.discordapp.com/attachments/1406277976739287202/1415163011601272953/standard.gif")
-    embed.set_footer(text="💫 Powered by EAGLE NODE | Secure VPS Hosting")
-
-    await interaction.response.send_message(embed=embed, ephemeral=False)
-
 # ========================
 # USER COMMANDS
 # ========================
@@ -263,7 +200,6 @@ async def list_command(interaction: discord.Interaction):
             inline=False
         )
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 @bot.tree.command(name="remove", description="🗑️ Delete your VPS")
 @app_commands.describe(container_id="Enter your container ID or name")
@@ -287,7 +223,6 @@ async def remove_vps(interaction: discord.Interaction, container_id: str):
         await interaction.followup.send(f"✅ VPS `{container_id}` removed successfully.", ephemeral=True)
     except:
         await interaction.followup.send("❌ Error removing VPS.", ephemeral=True)
-
 
 @bot.tree.command(name="manage", description="🧰 Manage your VPS with control buttons")
 @app_commands.describe(container_id="Enter your VPS container ID or name")
@@ -343,9 +278,23 @@ async def manage_command(interaction: discord.Interaction, container_id: str):
             subprocess.call(["docker", "stop", container_id])
             await interaction_button.response.send_message(f"🛑 VPS `{container_id}` stopped.", ephemeral=True)
 
-        @discord.ui.button(label="🔑 SSH", style=discord.ButtonStyle.primary)
+        @discord.ui.button(label="🔑 SSH (New)", style=discord.ButtonStyle.primary)
         async def ssh_button(self, interaction_button: discord.Interaction, button: discord.ui.Button):
-            await interaction_button.response.send_message(f"🔗 SSH Access:\n```{ssh}```", ephemeral=True)
+            await interaction_button.response.defer(ephemeral=True)
+            try:
+                exec_cmd = await asyncio.create_subprocess_exec(
+                    "docker", "exec", container_id, "tmate", "-F",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                new_ssh_line = await capture_ssh_session_line(exec_cmd)
+                if new_ssh_line:
+                    await interaction_button.followup.send(
+                        f"🔗 **New SSH Session Created!**\n```{new_ssh_line}```", ephemeral=True
+                    )
+                else:
+                    await interaction_button.followup.send("❌ Failed to create a new SSH session.", ephemeral=True)
+            except Exception as e:
+                await interaction_button.followup.send(f"⚠️ Error creating SSH session:\n`{e}`", ephemeral=True)
 
     await interaction.response.send_message(embed=embed, view=VPSControlView(), ephemeral=False)
 
@@ -362,6 +311,7 @@ async def on_ready():
     print(f"🚀 Logged in as {bot.user}")
     await bot.tree.sync()
     await bot.change_presence(activity=discord.Game(name="🦅 EAGLE NODE VPS Manager"))
+
 # ========================
 # RUN BOT
 # ========================
