@@ -1,133 +1,105 @@
 import discord
-from discord import app_commands
 from discord.ext import commands
-import subprocess
+from discord import app_commands, ui
 import asyncio
+import subprocess
 import random
 import string
+import os
+from datetime import datetime
 
-# ==========================
-# CONFIGURATION
-# ==========================
-TOKEN = "YOUR_DISCORD_BOT_TOKEN"   # replace with your bot token
-ADMIN_IDS = [1405778722732376176]           # replace with your Discord admin ID(s)
+# ========================
+# CONFIG
+# ========================
+TOKEN = ""  # <-- your bot token
+ADMIN_IDS = [1405778722732376176]  # <-- your Discord ID
+database_file = "database.txt"
+PUBLIC_IP = "138.68.79.95"
 
-# ==========================
-# INITIAL SETUP
-# ==========================
+# ========================
+# BOT SETUP
+# ========================
 intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix='/', intents=intents)
 
-
-# ==========================
+# ========================
 # HELPERS
-# ==========================
+# ========================
 def is_admin(user_id):
     return user_id in ADMIN_IDS
-
 
 def generate_random_string(length=6):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
+def add_to_database(user, container_name, ssh_command, ram, cpu, creator, os_type="Ubuntu 22.04"):
+    with open(database_file, 'a') as f:
+        f.write(f"{user}|{container_name}|{ssh_command}|{ram}|{cpu}|{creator}|{os_type}\n")
 
-def os_type_to_display_name(os_type: str) -> str:
-    return os_type.capitalize()
+def get_user_containers(user_name):
+    if not os.path.exists(database_file):
+        return []
+    with open(database_file, "r") as f:
+        return [line.strip().split("|") for line in f if user_name in line.split("|")[0]]
 
-
-def get_docker_image_for_os(os_type: str) -> str:
-    os_type = os_type.lower()
-    if os_type == "ubuntu":
-        return "ubuntu:22.04"
-    elif os_type == "debian":
-        return "debian:12"
-    else:
-        return "debian:latest"
-
-
-async def capture_ssh_session_line(exec_cmd):
-    """Read SSH line from tmate output"""
+async def capture_ssh_session_line(process):
     while True:
-        line = await exec_cmd.stdout.readline()
+        line = await process.stdout.readline()
         if not line:
             break
-        decoded = line.decode().strip()
-        if "ssh" in decoded:
-            return decoded
+        decoded = line.decode('utf-8').strip()
+        if "ssh session:" in decoded:
+            return decoded.split("ssh session:")[1].strip()
     return None
 
+def get_docker_image_for_os(os_type):
+    os_map = {"ubuntu": "ubuntu:22.04", "debian": "debian:12"}
+    return os_map.get(os_type, "ubuntu:22.04")
 
-# Placeholder DB (replace with real database logic)
-VPS_DB = {}  # key = username, value = dict with vps info
+def os_type_to_display_name(os_type):
+    os_map = {"ubuntu": "Ubuntu 22.04", "debian": "Debian 12"}
+    return os_map.get(os_type, "Unknown OS")
 
-
-def add_to_database(user, container, ssh, ram, cpu, creator, os_type):
-    VPS_DB[user] = {
-        "container": container,
-        "ssh": ssh,
-        "ram": ram,
-        "cpu": cpu,
-        "creator": creator,
-        "os": os_type,
-        "status": "Running ✅"
-    }
-    print(f"[DB] VPS added for {user}: {VPS_DB[user]}")
-
-
-# ==========================
+# ========================
 # ADMIN COMMANDS
-# ==========================
+# ========================
 @bot.tree.command(name="deploy", description="🚀 Admin: Deploy a new VPS instance for a user")
 @app_commands.describe(
     user="Select the user to assign the VPS to",
     os="Operating system (ubuntu or debian)",
-    ram="RAM in GB (e.g., 4, 8, 16, 32, or 'infinite')",
-    cpu="CPU cores (e.g., 1, 2, 4, 5, or 'infinite')"
+    ram="RAM in GB (0 = no limit)",
+    cpu="CPU cores (0 = no limit)"
 )
-async def deploy_command(interaction: discord.Interaction, user: discord.User, os: str, ram: str = "2", cpu: str = "1"):
+async def deploy_command(interaction: discord.Interaction, user: discord.User, os: str, ram: int, cpu: int):
     if not is_admin(interaction.user.id):
         await interaction.response.send_message("❌ Only admins can use this command.", ephemeral=True)
         return
 
     await interaction.response.defer()
 
-    def parse_limit(value):
-        if isinstance(value, str):
-            value = value.strip().lower()
-            if value in ["infinite", "∞", "unlimited", "none", "0"]:
-                return 0
-        try:
-            return int(value)
-        except ValueError:
-            return 0
+    ram = max(0, ram)
+    cpu = max(0, cpu)
 
-    ram_val = parse_limit(ram)
-    cpu_val = parse_limit(cpu)
-    container_name = f"VPS_{user.name}_{generate_random_string(6)}"
+    container_name = f"VPS_{user.name}_{generate_random_string()}"
     image = get_docker_image_for_os(os)
 
     try:
-        subprocess.check_call(["docker", "pull", image])
-
+        subprocess.call(["docker", "pull", image])
         docker_cmd = [
             "docker", "run", "-itd", "--privileged", "--cap-add=ALL",
-            "--hostname", container_name,
-            "--name", container_name,
+            "--hostname", "eaglenode", "--name", container_name, image
         ]
+        if ram > 0:
+            docker_cmd.insert(6, f"--memory={ram}G")
+        if cpu > 0:
+            docker_cmd.insert(7, f"--cpus={cpu}")
 
-        if ram_val > 0:
-            docker_cmd.append(f"--memory={ram_val}g")
-        if cpu_val > 0:
-            docker_cmd.append(f"--cpus={cpu_val}")
-
-        docker_cmd.append(image)
         container_id = subprocess.check_output(docker_cmd).decode().strip()
 
         await interaction.followup.send("⏳ Setting up your VPS, please wait...", ephemeral=True)
 
         install_cmd = (
-            "apt update -y && apt install -y git sudo neofetch docker.io unzip "
-            "tmate dropbear docker-compose && dropbear -p 22 || true"
+            "apt update -y && apt install git sudo neofetch docker.io unzip "
+            "tmate dropbear docker-compose -y && dropbear -p 22"
         )
         subprocess.call(["docker", "exec", "-i", container_name, "bash", "-c", install_cmd])
 
@@ -138,148 +110,122 @@ async def deploy_command(interaction: discord.Interaction, user: discord.User, o
         ssh_line = await capture_ssh_session_line(exec_cmd)
 
         if ssh_line:
-            add_to_database(
-                str(user),
-                container_name,
-                ssh_line,
-                "∞" if ram_val == 0 else str(ram_val),
-                "∞" if cpu_val == 0 else str(cpu_val),
-                str(interaction.user),
-                os_type_to_display_name(os)
-            )
-
+            add_to_database(str(user), container_name, ssh_line, ram, cpu, str(interaction.user), os_type_to_display_name(os))
             embed = discord.Embed(title="✅ VPS Created Successfully!", color=0x2400ff)
             embed.add_field(name="OS", value=os_type_to_display_name(os))
-            embed.add_field(name="RAM", value=f"{'∞' if ram_val == 0 else ram_val} GB")
-            embed.add_field(name="CPU", value=f"{'∞' if cpu_val == 0 else cpu_val} cores")
+            embed.add_field(name="RAM", value=f"{ram if ram > 0 else '∞'} GB")
+            embed.add_field(name="CPU", value=f"{cpu if cpu > 0 else '∞'} cores")
             embed.add_field(name="SSH Command", value=f"```{ssh_line}```", inline=False)
             embed.add_field(name="Container Name", value=container_name)
             await user.send(embed=embed)
             await interaction.followup.send(f"✅ VPS created and details sent to {user.mention}", ephemeral=True)
         else:
-            subprocess.call(["docker", "stop", container_name])
-            subprocess.call(["docker", "rm", container_name])
-            await interaction.followup.send("❌ Failed to create tmate session. Container removed.", ephemeral=True)
+            await interaction.followup.send("❌ Failed to generate SSH session.", ephemeral=True)
 
     except subprocess.CalledProcessError as e:
-        await interaction.followup.send(f"❌ Docker error: `{e}`", ephemeral=True)
-    except Exception as exc:
-        await interaction.followup.send(f"❌ Unexpected error: `{exc}`", ephemeral=True)
+        await interaction.followup.send(f"❌ Docker error: {e}", ephemeral=True)
 
-
-@bot.tree.command(name="plans", description="💾 Show available VPS plans")
-async def plans_command(interaction: discord.Interaction):
-    plans = [
-        {"name": "Basic", "ram": 4, "cpu": 1},
-        {"name": "Standard", "ram": 8, "cpu": 2},
-        {"name": "Pro", "ram": 16, "cpu": 4},
-        {"name": "Ultra", "ram": 32, "cpu": 5},
-        {"name": "Infinite", "ram": "∞", "cpu": "∞"},
-    ]
-    embed = discord.Embed(title="💾 VPS Plans", color=0x00ff88)
-    for plan in plans:
-        embed.add_field(name=plan["name"], value=f"RAM: {plan['ram']} GB | CPU: {plan['cpu']} cores", inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-# ==========================
+# ========================
 # USER COMMANDS
-# ==========================
-@bot.tree.command(name="myvps", description="💻 View your VPS details")
-async def myvps_command(interaction: discord.Interaction):
-    user = str(interaction.user)
-    if user not in VPS_DB:
-        await interaction.response.send_message("❌ You don't have any VPS yet.", ephemeral=True)
+# ========================
+@bot.tree.command(name="list", description="🌐 Show your VPS instances")
+async def list_user_vps(interaction: discord.Interaction):
+    vps_list = get_user_containers(str(interaction.user))
+    if not vps_list:
+        await interaction.response.send_message("📂 You don’t have any VPS instances.", ephemeral=True)
         return
-
-    vps = VPS_DB[user]
-    embed = discord.Embed(title="💻 Your VPS Details", color=0x00ff99)
-    embed.add_field(name="OS", value=vps["os"])
-    embed.add_field(name="RAM", value=f"{vps['ram']} GB")
-    embed.add_field(name="CPU", value=f"{vps['cpu']} cores")
-    embed.add_field(name="Status", value=vps["status"], inline=False)
-    embed.add_field(name="SSH Command", value=f"```{vps['ssh']}```", inline=False)
-    embed.add_field(name="Container", value=vps["container"], inline=False)
+    embed = discord.Embed(title="🌐 Your VPS Instances", color=0x2400ff)
+    for user, cname, ssh, ram, cpu, creator, os_type in vps_list:
+        embed.add_field(
+            name=cname,
+            value=f"OS: {os_type}\nRAM: {('∞' if ram == '0' else ram+'GB')} | CPU: {('∞' if cpu == '0' else cpu+' cores')}\nSSH: `{ssh}`",
+            inline=False
+        )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# ========================
+# BASIC COMMANDS
+# ========================
+@bot.tree.command(name="ping", description="🏓 Check bot latency")
+async def ping_command(interaction: discord.Interaction):
+    latency = round(bot.latency * 1000)
+    await interaction.response.send_message(f"🏓 Pong! `{latency}ms`")
 
-@bot.tree.command(name="status", description="📊 Check your VPS status")
-async def status_command(interaction: discord.Interaction):
-    user = str(interaction.user)
-    if user not in VPS_DB:
-        await interaction.response.send_message("❌ No VPS found.", ephemeral=True)
-        return
-    container_name = VPS_DB[user]["container"]
-    try:
-        status = subprocess.check_output(
-            ["docker", "inspect", "-f", "{{.State.Status}}", container_name]
-        ).decode().strip()
-        VPS_DB[user]["status"] = f"{status.capitalize()} ✅"
-        await interaction.response.send_message(f"📊 `{container_name}` is **{status}**.", ephemeral=True)
-    except subprocess.CalledProcessError:
-        await interaction.response.send_message("❌ VPS not found or deleted.", ephemeral=True)
+@bot.tree.command(name="help", description="📘 Show available commands")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(title="🪐 EAGLE NODE | Help Menu", color=0x2400ff)
+    embed.add_field(name="🚀 /deploy", value="Admin — Deploy VPS", inline=False)
+    embed.add_field(name="🗑️ /delete-user-container", value="Admin — Delete VPS", inline=False)
+    embed.add_field(name="🌍 /list-all", value="Show your VPS list (admins see all)", inline=False)
+    embed.add_field(name="🌐 /list", value="Show your VPS list", inline=False)
+    embed.add_field(name="♻️ /regen-ssh", value="Regenerate SSH link", inline=False)
+    embed.add_field(name="🗑️ /remove", value="Delete your VPS", inline=False)
+    embed.add_field(name="🏓 /ping", value="Check bot latency", inline=False)
+    embed.set_footer(text="💫 Powered by EAGLE NODE | Secure VPS Hosting")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# ========================
+# NEW COMMAND: /plans
+# ========================
+@bot.tree.command(name="plans", description="💎 View available VPS hosting plans")
+async def plans_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="💎 EAGLE NODE | VPS Hosting Plans",
+        description="Choose your plan and start hosting instantly!",
+        color=0x2400ff
+    )
 
-@bot.tree.command(name="stopvps", description="🛑 Stop your VPS")
-async def stopvps_command(interaction: discord.Interaction):
-    user = str(interaction.user)
-    if user not in VPS_DB:
-        await interaction.response.send_message("❌ You don't have a VPS.", ephemeral=True)
-        return
-    container_name = VPS_DB[user]["container"]
-    try:
-        subprocess.check_call(["docker", "stop", container_name])
-        VPS_DB[user]["status"] = "Stopped 🛑"
-        await interaction.response.send_message(f"🛑 VPS `{container_name}` stopped successfully.", ephemeral=True)
-    except subprocess.CalledProcessError:
-        await interaction.response.send_message("❌ VPS not found or already stopped.", ephemeral=True)
+    embed.set_image(url="https://cdn.discordapp.com/attachments/1406277976739287202/1415163011601272953/standard.gif?ex=68ebbc02&is=68ea6a82&hm=e08f619cd6048415608d9c8868148a5cb60a3019788fb30d4eea2715b115c230&")
 
+    embed.add_field(
+        name="<:ateex_server_host:1423672049125036133> VPS 1",
+        value=(
+            "<:PriceTag_USD:1423671938764636222> **Invites:** 10 invites\n"
+            "<:RAM:1423672181824425994> **RAM:** 8 GB DDR4\n"
+            "<:ateex_ssd:1423672067080978504> **Storage:** 20 GB SSD\n"
+            "<:Intel_Xeon_CPU:1423672094943740006> **CPU:** 2 Cores\n"
+            "<:ateex_up:1423672257296994305> **Uptime:** 24/7\n"
+            "<:debian:1423672199222530069> **OS:** Debian\n"
+            "<:panel:1423673508801679412> **Panel:** Pterodactyl Supported"
+        ),
+        inline=False
+    )
 
-@bot.tree.command(name="startvps", description="▶️ Start your VPS")
-async def startvps_command(interaction: discord.Interaction):
-    user = str(interaction.user)
-    if user not in VPS_DB:
-        await interaction.response.send_message("❌ You don't have a VPS.", ephemeral=True)
-        return
-    container_name = VPS_DB[user]["container"]
-    try:
-        subprocess.check_call(["docker", "start", container_name])
-        VPS_DB[user]["status"] = "Running ✅"
-        await interaction.response.send_message(f"▶️ VPS `{container_name}` started successfully.", ephemeral=True)
-    except subprocess.CalledProcessError:
-        await interaction.response.send_message("❌ VPS not found or already running.", ephemeral=True)
+    embed.add_field(
+        name="<:ateex_server_host:1423672049125036133> VPS 2",
+        value=(
+            "<:PriceTag_USD:1423671938764636222> **Invites:** 20 invites\n"
+            "<:RAM:1423672181824425994> **RAM:** 16 GB DDR4\n"
+            "<:ateex_ssd:1423672067080978504> **Storage:** 40 GB SSD\n"
+            "<:Intel_Xeon_CPU:1423672094943740006> **CPU:** 4 Cores\n"
+            "<:ateex_up:1423672257296994305> **Uptime:** 24/7\n"
+            "<:debian:1423672199222530069> **OS:** Debian\n"
+            "<:panel:1423673508801679412> **Panel:** Pterodactyl Supported"
+        ),
+        inline=False
+    )
 
+    embed.set_footer(text="💫 Powered by EAGLE NODE | Secure VPS Hosting")
+    await interaction.response.send_message(embed=embed, ephemeral=False)
 
-@bot.tree.command(name="deletevps", description="⚠️ Delete your VPS permanently")
-async def deletevps_command(interaction: discord.Interaction):
-    user = str(interaction.user)
-    if user not in VPS_DB:
-        await interaction.response.send_message("❌ You don't have a VPS.", ephemeral=True)
-        return
-    container_name = VPS_DB[user]["container"]
-    try:
-        subprocess.call(["docker", "stop", container_name])
-        subprocess.call(["docker", "rm", container_name])
-        del VPS_DB[user]
-        await interaction.response.send_message(f"🗑️ VPS `{container_name}` deleted successfully.", ephemeral=True)
-    except subprocess.CalledProcessError:
-        await interaction.response.send_message("❌ VPS not found or already deleted.", ephemeral=True)
-
-
-# ==========================
-# EVENTS
-# ==========================
+# ========================
+# BOT STATUS
+# ========================
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    try:
-        synced = await bot.tree.sync()
-        print(f"🔁 Synced {len(synced)} commands.")
-    except Exception as e:
-        print(f"❌ Sync failed: {e}")
+    print(f"🚀 Bot online as {bot.user}")
+    await bot.tree.sync()
 
+    async def update_status():
+        while True:
+            instance_count = len(open(database_file).readlines()) if os.path.exists(database_file) else 0
+            status = f"Watching 💫 EAGLE NODE {instance_count} VPS"
+            await bot.change_presence(activity=discord.Game(name=status))
+            await asyncio.sleep(2)
 
-# ==========================
+    bot.loop.create_task(update_status())
+
+# ========================
 # RUN BOT
-# ==========================
+# ========================
 bot.run(TOKEN)
