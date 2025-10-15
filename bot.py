@@ -96,28 +96,30 @@ async def deploy_command(interaction: discord.Interaction, user: discord.User, o
             docker_cmd.extend(["--cpus", str(cpu)])
 
         docker_cmd.extend(["--name", container_name, image])
-
         container_id = subprocess.check_output(docker_cmd).decode().strip()
 
+        # 1️⃣ Notify setup start
         await interaction.followup.send("⏳ Setting up your VPS, please wait...", ephemeral=True)
 
-        # ===== FAST INSTALL SECTION =====
+        # 2️⃣ FAST INSTALL (with SSL fix)
         subprocess.call(["docker", "exec", "-i", container_name, "bash", "-c", """
             apt-get update -y && \
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            tmate neofetch screen wget curl htop nano vim openssh-server sudo ufw git docker.io systemd systemd-sysv && \
+            ca-certificates tmate neofetch screen wget curl htop nano vim openssh-server sudo ufw git docker.io systemd systemd-sysv && \
+            update-ca-certificates && \
             apt-get clean && rm -rf /var/lib/apt/lists/* && \
             systemctl enable ssh || true && \
             service ssh start || systemctl start ssh
         """])
 
-        # Start tmate session and capture SSH info
+        # 3️⃣ Start tmate session and capture SSH info
         exec_cmd = await asyncio.create_subprocess_exec(
             "docker", "exec", container_name, "tmate", "-F",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         ssh_line = await capture_ssh_session_line(exec_cmd)
 
+        # 4️⃣ Send info
         if ssh_line:
             add_to_database(str(user), container_name, ssh_line, ram, cpu, str(interaction.user), os_type_to_display_name(os))
             embed = discord.Embed(title="✅ VPS Created Successfully!", color=0x2400ff)
@@ -127,7 +129,13 @@ async def deploy_command(interaction: discord.Interaction, user: discord.User, o
             embed.add_field(name="🔐 SSH Command", value=f"```{ssh_line}```", inline=False)
             embed.add_field(name="📦 Container Name", value=container_name)
             await user.send(embed=embed)
-            await interaction.followup.send(f"✅ VPS created and details sent to {user.mention}", ephemeral=True)
+
+            # 5️⃣ Success confirmation message
+            await interaction.followup.send(
+                f"✅ EagleNode VPS creation successful! VPS has been created for {user.mention}. "
+                f"Check your DMs for connection details.",
+                ephemeral=False
+            )
         else:
             await interaction.followup.send("❌ Failed to generate SSH session.", ephemeral=True)
 
