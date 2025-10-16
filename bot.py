@@ -1,170 +1,175 @@
-# bot.py
-import asyncio
 import random
 import subprocess
 import os
 import discord
 from discord.ext import commands, tasks
+import asyncio
 from discord import app_commands
-from datetime import datetime, timedelta
 import psutil
+from datetime import datetime
 import re
 import time
-import shlex
-import logging
 
-# ----------------------------
-# Configuration - EDIT THESE
-# ----------------------------
-TOKEN = ""  # <-- Put your bot token here
-LOGS_CHANNEL_ID = 1420803132144750703  # <-- Replace with your logs channel ID (int)
-ADMIN_ROLE_ID = 1416372125953949758  # <-- Replace with your admin role ID (int)
-DATABASE_FILE = "database.txt"
-EMBED_COLOR = 0x9B59B6
-WATERMARK = "EagleNode"
-WELCOME_MESSAGE = "Welcome to EagleNode"
-AUTODELETE_HOURS = 4  # auto-delete after 4 hours inactivity
-PACKAGE_INSTALL_TIMEOUT = 600  # seconds for apt-get install
-# OS images mapping (images you have locally)
-OS_IMAGES = {
-    "ubuntu": "ubuntu-vps",
-    "debian": "debian-vps",
-    "kali": "kali-vps",
-    # other images may exist but package install will be skipped if not apt-based
+# Configuration
+TOKEN = ''  # REPLACE WITH YOUR BOT'S TOKEN
+RAM_LIMIT = '2g'
+SERVER_LIMIT = 12
+LOGS_CHANNEL_ID = 123456789    # CHANGE TO YOUR LOGS CHANNEL ID
+ADMIN_ROLE_ID = 123456789     # CHANGE TO YOUR ADMIN ROLE ID
+
+database_file = 'database.txt'
+
+intents = discord.Intents.default()
+intents.messages = False
+intents.message_content = False
+intents.members = True  # Needed for role checking
+
+bot = commands.Bot(command_prefix='/', intents=intents)
+
+# Embed color constant
+EMBED_COLOR = 0x9B59B6  # Purple color
+
+# OS Options with fancy emojis and descriptions
+OS_OPTIONS = {
+    "ubuntu": {
+        "image": "ubuntu-vps", 
+        "name": "Ubuntu 22.04", 
+        "emoji": "🐧",
+        "description": "Stable and widely-used Linux distribution"
+    },
+    "debian": {
+        "image": "debian-vps", 
+        "name": "Debian 12", 
+        "emoji": "🦕",
+        "description": "Rock-solid stability with large software repository"
+    },
+    "alpine": {
+        "image": "alpine-vps", 
+        "name": "Alpine Linux", 
+        "emoji": "⛰️",
+        "description": "Lightweight and security-focused"
+    },
+    "arch": {
+        "image": "arch-vps", 
+        "name": "Arch Linux", 
+        "emoji": "🎯",
+        "description": "Rolling release with bleeding-edge software"
+    },
+    "kali": {
+        "image": "kali-vps", 
+        "name": "Kali Linux", 
+        "emoji": "💣",
+        "description": "Penetration testing and security auditing"
+    },
+    "fedora": {
+        "image": "fedora-vps", 
+        "name": "Fedora", 
+        "emoji": "🎩",
+        "description": "Innovative features with Red Hat backing"
+    }
 }
 
-# ----------------------------
-# Logging
-# ----------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("eaglenode")
+# Animation frames for different states
+LOADING_ANIMATION = ["🔄", "⚡", "✨", "🌀", "🌪️", "🌈"]
+SUCCESS_ANIMATION = ["✅", "🎉", "✨", "🌟", "💫", "🔥"]
+ERROR_ANIMATION = ["❌", "💥", "⚠️", "🚨", "🔴", "🛑"]
+DEPLOY_ANIMATION = ["🚀", "🛰️", "🌌", "🔭", "👨‍🚀", "🪐"]
 
-# ----------------------------
-# Intents & Bot
-# ----------------------------
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = False
+async def is_admin(interaction: discord.Interaction) -> bool:
+    """Check if the user has admin role or administrator permissions"""
+    if interaction.user.guild_permissions.administrator:
+        return True
+    return any(role.id == ADMIN_ROLE_ID for role in interaction.user.roles)
 
-bot = commands.Bot(command_prefix="/", intents=intents)
-start_time = datetime.utcnow()
+async def is_admin_role_only(interaction: discord.Interaction) -> bool:
+    """Check if the user has the specific admin role."""
+    return any(role.id == ADMIN_ROLE_ID for role in interaction.user.roles)
 
-# ----------------------------
-# Helpers: database (text file)
-# format per line:
-# owner|container_id|ssh_command|last_seen_iso|os|memory|cpu|disk|username
-# ----------------------------
-def add_to_database_row(owner: str, container_id: str, ssh_command: str, os_name: str, memory: str, cpu: str, disk: str, username: str):
-    now = datetime.utcnow().isoformat()
-    with open(DATABASE_FILE, "a") as f:
-        f.write(f"{owner}|{container_id}|{ssh_command}|{now}|{os_name}|{memory}|{cpu}|{disk}|{username}\n")
+def generate_random_port():
+    return random.randint(1025, 65535)
 
-def remove_from_database_by_ssh(ssh_command: str):
-    if not os.path.exists(DATABASE_FILE):
+def add_to_database(user, container_name, ssh_command):
+    with open(database_file, 'a') as f:
+        f.write(f"{user}|{container_name}|{ssh_command}\n")
+
+def remove_from_database(ssh_command):
+    if not os.path.exists(database_file):
         return
-    with open(DATABASE_FILE, "r") as f:
+    with open(database_file, 'r') as f:
         lines = f.readlines()
-    with open(DATABASE_FILE, "w") as f:
+    with open(database_file, 'w') as f:
         for line in lines:
             if ssh_command not in line:
                 f.write(line)
 
-def remove_from_database_by_id(container_id: str):
-    if not os.path.exists(DATABASE_FILE):
+def remove_container_from_database_by_id(container_id):
+    if not os.path.exists(database_file):
         return
-    with open(DATABASE_FILE, "r") as f:
+    with open(database_file, 'r') as f:
         lines = f.readlines()
-    with open(DATABASE_FILE, "w") as f:
+    with open(database_file, 'w') as f:
         for line in lines:
-            parts = line.strip().split("|")
-            if len(parts) >= 2 and not parts[1].startswith(container_id):
+            parts = line.strip().split('|')
+            if len(parts) < 2 or parts[1] != container_id:
                 f.write(line)
 
-def update_last_seen(container_id: str):
-    if not os.path.exists(DATABASE_FILE):
-        return
-    out_lines = []
-    with open(DATABASE_FILE, "r") as f:
+def get_container_info_by_id(container_id):
+    if not os.path.exists(database_file):
+        return None, None, None
+    with open(database_file, 'r') as f:
         for line in f:
-            parts = line.strip().split("|")
-            if len(parts) >= 2 and parts[1].startswith(container_id):
-                parts[3] = datetime.utcnow().isoformat()
-                out_lines.append("|".join(parts) + "\n")
-            else:
-                out_lines.append(line)
-    with open(DATABASE_FILE, "w") as f:
-        f.writelines(out_lines)
+            parts = line.strip().split('|')
+            if len(parts) >= 3 and parts[1].startswith(container_id):
+                return parts[0], parts[1], parts[2]
+    return None, None, None
 
-def get_user_servers(owner: str):
-    if not os.path.exists(DATABASE_FILE):
+def clear_database():
+    if os.path.exists(database_file):
+        os.remove(database_file)
+
+async def capture_ssh_session_line(process):
+    while True:
+        output = await process.stdout.readline()
+        if not output:
+            break
+        output = output.decode('utf-8').strip()
+        if "ssh session:" in output:
+            return output.split("ssh session:")[1].strip()
+    return None
+
+def get_user_servers(user):
+    if not os.path.exists(database_file):
         return []
     servers = []
-    with open(DATABASE_FILE, "r") as f:
+    with open(database_file, 'r') as f:
         for line in f:
-            parts = line.strip().split("|")
-            if parts and parts[0] == owner:
-                servers.append(parts)
+            parts = line.strip().split('|')
+            if len(parts) >= 3 and parts[0] == user:
+                servers.append(line.strip())
     return servers
 
 def get_all_servers():
-    if not os.path.exists(DATABASE_FILE):
+    if not os.path.exists(database_file):
         return []
-    rows = []
-    with open(DATABASE_FILE, "r") as f:
+    servers = []
+    with open(database_file, 'r') as f:
         for line in f:
-            parts = line.strip().split("|")
-            if parts and len(parts) >= 9:
-                rows.append(parts)
-    return rows
+            servers.append(line.strip())
+    return servers
 
-def find_server_by_prefix(container_prefix: str):
-    if not os.path.exists(DATABASE_FILE):
+def count_user_servers(user):
+    return len(get_user_servers(user))
+
+def get_container_id_from_database(user, container_name):
+    if not os.path.exists(database_file):
         return None
-    with open(DATABASE_FILE, "r") as f:
+    with open(database_file, 'r') as f:
         for line in f:
-            parts = line.strip().split("|")
-            if len(parts) >= 2 and parts[1].startswith(container_prefix):
-                return parts
+            parts = line.strip().split('|')
+            if len(parts) >= 3 and parts[0] == user and container_name in parts[1]:
+                return parts[1]
     return None
 
-# ----------------------------
-# Docker command runner
-# ----------------------------
-async def run_docker_command(container_id: str, command: list, timeout: int = 300):
-    """Run command inside a container. command is a list, e.g. ['bash','-c','some']"""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", container_id, *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return False, "timeout"
-        output = (stdout + stderr).decode("utf-8", errors="ignore")
-        return (proc.returncode == 0), output
-    except Exception as e:
-        return False, str(e)
-
-async def capture_ssh_session_line(process):
-    """Read stdout lines until we find a tmate SSH session line (best-effort)."""
-    while True:
-        line = await process.stdout.readline()
-        if not line:
-            break
-        try:
-            s = line.decode("utf-8", errors="ignore").strip()
-        except:
-            continue
-        if "ssh session" in s.lower() or "ssh://" in s or "ssh " in s:
-            return s
-    return None
-
-# ----------------------------
-# Utility: container stats & host resources
-# ----------------------------
 def get_system_resources():
     try:
         cpu_percent = psutil.cpu_percent(interval=1)
@@ -174,445 +179,1280 @@ def get_system_resources():
         disk = psutil.disk_usage('/')
         disk_total = disk.total / (1024 ** 3)
         disk_used = disk.used / (1024 ** 3)
+        
         return {
             'cpu': cpu_percent,
             'memory': {'total': round(mem_total, 2), 'used': round(mem_used, 2), 'percent': mem.percent},
             'disk': {'total': round(disk_total, 2), 'used': round(disk_used, 2), 'percent': disk.percent}
         }
     except Exception:
-        return {'cpu': 0, 'memory': {'total':0,'used':0,'percent':0}, 'disk': {'total':0,'used':0,'percent':0}}
+        return {
+            'cpu': 0,
+            'memory': {'total': 0, 'used': 0, 'percent': 0},
+            'disk': {'total': 0, 'used': 0, 'percent': 0}
+        }
 
 def get_container_stats():
+    """Get CPU and memory usage for all running containers."""
     try:
         stats_raw = subprocess.check_output(
             ["docker", "stats", "--no-stream", "--format", "{{.ID}}|{{.CPUPerc}}|{{.MemUsage}}"],
             text=True
-        ).strip().splitlines()
-    except Exception:
+        ).strip().split('\n')
+        
+        stats = {}
+        for line in stats_raw:
+            parts = line.split('|')
+            if len(parts) >= 3:
+                container_id = parts[0]
+                cpu_percent = parts[1].strip()
+                mem_usage_raw = parts[2].strip()
+
+                mem_match = re.match(r"(\d+(\.\d+)?\w+)\s+/\s+(\d+(\.\d+)?\w+)", mem_usage_raw)
+                
+                mem_used = 'N/A'
+                mem_limit = 'N/A'
+                
+                if mem_match:
+                    mem_used = mem_match.group(1)
+                    mem_limit = mem_match.group(3)
+                else:
+                    mem_used = '0B'
+                    mem_limit = '0B'
+
+                stats[container_id] = {
+                    'cpu': cpu_percent,
+                    'mem_used': mem_used,
+                    'mem_limit': mem_limit
+                }
+        return stats
+    except Exception as e:
+        print(f"Error getting container stats: {e}")
         return {}
-    stats = {}
-    for line in stats_raw:
-        parts = line.split("|")
-        if len(parts) >= 3:
-            cid = parts[0]
-            stats[cid] = {'cpu': parts[1].strip(), 'mem': parts[2].strip()}
-    return stats
 
-# ----------------------------
-# Permissions helpers
-# ----------------------------
-async def is_admin(interaction: discord.Interaction) -> bool:
-    if interaction.user.guild_permissions.administrator:
-        return True
-    return any(role.id == ADMIN_ROLE_ID for role in interaction.user.roles)
+async def animate_message(message, embed, animation_frames, duration=5):
+    """Animate a message with changing emojis"""
+    start_time = time.time()
+    frame_index = 0
+    
+    while time.time() - start_time < duration:
+        embed.set_author(name=f"{animation_frames[frame_index]} {message}")
+        try:
+            await interaction.edit_original_response(embed=embed)
+        except:
+            pass
+        
+        frame_index = (frame_index + 1) % len(animation_frames)
+        await asyncio.sleep(0.5)
 
-async def is_admin_role_only(interaction: discord.Interaction) -> bool:
-    return any(role.id == ADMIN_ROLE_ID for role in interaction.user.roles)
-
-# ----------------------------
-# Ready + status
-# ----------------------------
 @bot.event
 async def on_ready():
-    await bot.change_presence(activity=discord.Game(name="EAGLE NODE VPS"))
-    print("🎮 Status set to: Playing EAGLE NODE VPS")
-    print(f"✨ Bot is ready. Logged in as {bot.user}")
+    change_status.start()
+    print(f'✨ Bot is ready. Logged in as {bot.user} ✨')
     try:
-        await bot.tree.sync()
-        print("🔁 Commands synced.")
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} commands")
     except Exception as e:
-        print("❌ Sync error:", e)
-    auto_cleanup.start()
-    # you can also start other background tasks here
+        print(f"Error syncing commands: {e}")
 
-# ----------------------------
-# Background: auto-delete inactive VPSs
-# ----------------------------
-@tasks.loop(minutes=10)
-async def auto_cleanup():
-    now = datetime.utcnow()
-    if not os.path.exists(DATABASE_FILE):
-        return
-    rows = get_all_servers()
-    for parts in rows:
-        try:
-            owner = parts[0]
-            container_id = parts[1]
-            last_seen = datetime.fromisoformat(parts[3])
-            if now - last_seen > timedelta(hours=AUTODELETE_HOURS):
-                # try to stop & remove container
-                try:
-                    subprocess.run(["docker", "stop", container_id], check=False)
-                    subprocess.run(["docker", "rm", container_id], check=False)
-                except Exception as e:
-                    logger.warning(f"Auto cleanup failed docker remove {container_id}: {e}")
-                remove_from_database_by_id(container_id)
-                # notify logs channel
-                channel = bot.get_channel(LOGS_CHANNEL_ID)
-                if channel:
-                    await channel.send(f"⏳ Auto-removed inactive VPS `{container_id[:12]}` (owner: `{owner}`)")
-        except Exception:
-            continue
-
-# ----------------------------
-# /deploy command - Admin only
-# ----------------------------
-@bot.tree.command(name="deploy", description="🚀 [ADMIN] Deploy a new VPS for a user")
-@app_commands.describe(user="User to deploy for", os="OS (ubuntu|debian|kali)", ram="Memory GB", cpu="CPU cores")
-async def deploy(interaction: discord.Interaction, user: discord.User, os: str, ram: int, cpu: int):
-    # admin check
-    if not await is_admin_role_only(interaction):
-        await interaction.response.send_message("🚫 Permission denied. Admins only.", ephemeral=True)
-        return
-
-    os = os.lower()
-    if os not in OS_IMAGES:
-        await interaction.response.send_message(f"❌ Unsupported OS. Supported: {', '.join(OS_IMAGES.keys())}", ephemeral=True)
-        return
-
-    image = OS_IMAGES[os]
-    memory = str(ram)
-    cpu_count = str(cpu)
-    disk = "4"  # default disk in GB (could be parameterized)
-    username = "user"  # default username
-    ssh_password = "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=10))
-    root_password = "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=12))
-    vps_id = "".join(random.choices("abcdef0123456789", k=8))
-
-    # initial response
-    embed = discord.Embed(title=f"🚀 Deploying {os.capitalize()} for {user.display_name}", description="Creating container...", color=EMBED_COLOR)
-    await interaction.response.send_message(embed=embed)
-    status_msg = await interaction.original_response()
-
+@tasks.loop(seconds=5)
+async def change_status():
     try:
-        # create container
-        # We use privileged + detached; adjust flags to your environment
-        create_cmd = ["docker", "run", "-itd", "--privileged", "--name", f"eaglenode-{vps_id}", image]
-        create_out = subprocess.check_output(create_cmd).decode('utf-8').strip()
-        container_id = create_out
-        # log
-        await send_to_logs(f"🔧 {interaction.user} deployed {image} for {user} (ID: {container_id[:12]})")
+        instance_count = len(open(database_file).readlines()) if os.path.exists(database_file) else 0
+        statuses = [  
+            f"🌠 Managing {instance_count} Cloud Instances",  
+            f"⚡ Powering {instance_count} Servers",  
+            f"🔮 Watching over {instance_count} VMs",
+            f"🚀 Hosting {instance_count} Dreams",
+            f"💻 Serving {instance_count} Terminals",
+            f"🌐 Running {instance_count} Nodes"
+        ]  
+        await bot.change_presence(activity=discord.Game(name=random.choice(statuses)))  
+    except Exception as e:  
+        print(f"💥 Failed to update status: {e}")
 
-        # Install packages for apt-based OS
-        def is_apt_based(os_name):
-            return os_name in ("ubuntu", "debian", "kali")
+async def send_to_logs(message):
+    try:
+        channel = bot.get_channel(LOGS_CHANNEL_ID)
+        if channel:
+            perms = channel.permissions_for(channel.guild.me)
+            if perms.send_messages:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                await channel.send(f"`[{timestamp}]` {message}")
+    except Exception as e:
+        print(f"Failed to send logs: {e}")
 
-        if is_apt_based(os):
-            try:
+@bot.tree.command(name="deploy", description="🚀 [ADMIN] Create a new cloud instance for a user")
+@app_commands.describe(
+    user="The user to deploy for",
+    os="The OS to deploy (ubuntu, debian, alpine, arch, kali, fedora)"
+)
+async def deploy(interaction: discord.Interaction, user: discord.User, os: str):
+    try:
+        if not await is_admin_role_only(interaction):
+            embed = discord.Embed(
+                title="🚫 Permission Denied",
+                description="This command is restricted to administrators only.",
+                color=0xFF0000
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        os = os.lower()
+        if os not in OS_OPTIONS:
+            valid_oses = "\n".join([f"{OS_OPTIONS[os_id]['emoji']} **{os_id}** - {OS_OPTIONS[os_id]['description']}" 
+                                   for os_id in OS_OPTIONS.keys()])
+            embed = discord.Embed(
+                title="❌ Invalid OS Selection",
+                description=f"**Available OS options:**\n{valid_oses}",
+                color=EMBED_COLOR
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        os_data = OS_OPTIONS[os]
+        
+        # Initial response with loading animation
+        embed = discord.Embed(
+            title=f"🚀 Launching {os_data['emoji']} {os_data['name']} Instance",
+            description=f"```diff\n+ Preparing magical {os_data['name']} experience for {user.display_name}...\n```",
+            color=EMBED_COLOR
+        )
+        embed.add_field(
+            name="🛠️ System Info",
+            value=f"```RAM: {RAM_LIMIT}\nAuto-Delete: 4h Inactivity```",
+            inline=False
+        )
+        embed.set_footer(text="This may take 1-2 minutes...")
+        
+        await interaction.response.send_message(embed=embed)
+        msg = await interaction.original_response()
+
+        # Animate the loading process
+        await animate_message("Initializing Deployment", embed, DEPLOY_ANIMATION, 3)
+
+        try:  
+            # Step 1: Container creation
+            embed.clear_fields()
+            embed.description = "```diff\n+ Pulling container image from repository...\n```"
+            await msg.edit(embed=embed)
+            
+            container_id = subprocess.check_output(
+                ["docker", "run", "-itd", "--privileged", os_data["image"]]
+            ).strip().decode('utf-8')  
+            
+            await send_to_logs(f"🔧 {interaction.user.mention} deployed {os_data['emoji']} {os_data['name']} for {user.mention} (ID: `{container_id[:12]}`)")
+            
+            # Step 2: SSH setup
+            embed.description = "```diff\n+ Configuring SSH access and security...\n```"
+            await msg.edit(embed=embed)
+            await animate_message("Configuring SSH", embed, LOADING_ANIMATION, 2)
+
+            exec_cmd = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "tmate", "-F",
+                stdout=asyncio.subprocess.PIPE, 
+                stderr=asyncio.subprocess.PIPE
+            )  
+            
+            ssh_session_line = await capture_ssh_session_line(exec_cmd)
+            
+            if ssh_session_line:  
+                # Success - send to admin and user
+                admin_embed = discord.Embed(  
+                    title=f"🎉 {os_data['emoji']} {os_data['name']} Instance Ready!",  
+                    description=f"**Successfully deployed for {user.mention}**\n\n**🔑 SSH Command:**\n```{ssh_session_line}```",  
+                    color=0x00FF00
+                )
+                admin_embed.add_field(
+                    name="📦 Container Info",
+                    value=f"```ID: {container_id[:12]}\nOS: {os_data['name']}\nStatus: Running```",
+                    inline=False
+                )
+                admin_embed.set_footer(text="💎 This instance will auto-delete after 4 hours of inactivity")
+                await interaction.followup.send(embed=admin_embed, ephemeral=True)
+                
                 try:
-                    await status_msg.edit(embed=discord.Embed(title="📦 Installing packages...", description="Running apt-get update", color=EMBED_COLOR))
-                except:
+                    user_embed = discord.Embed(  
+                        title=f"✨ Your {os_data['name']} Instance is Ready!",  
+                        description=f"**SSH Access Details:**\n```{ssh_session_line}```\n\nDeployed by: {interaction.user.mention}",  
+                        color=EMBED_COLOR  
+                    )
+                    user_embed.add_field(
+                        name="💡 Getting Started",
+                        value="```Connect using any SSH client\nUsername: root\nNo password required```",
+                        inline=False
+                    )
+                    user_embed.set_footer(text="💎 This instance will auto-delete after 4 hours of inactivity")
+                    await user.send(embed=user_embed)
+                except discord.Forbidden:
                     pass
+                
+                add_to_database(str(user), container_id, ssh_session_line)  
+                
+                # Final success message
+                embed = discord.Embed(  
+                    title=f"✅ Deployment Complete! {random.choice(SUCCESS_ANIMATION)}",  
+                    description=f"**{os_data['emoji']} {os_data['name']}** instance created for {user.mention}!",
+                    color=0x00FF00  
+                )  
+                embed.set_thumbnail(url="https://i.imgur.com/W7D8e3i.png")  # Success icon
+                await msg.edit(embed=embed)
+            else:  
+                embed = discord.Embed(  
+                    title=f"⚠️ Timeout {random.choice(ERROR_ANIMATION)}",  
+                    description="```diff\n- SSH configuration timed out...\n- Rolling back deployment\n```",  
+                    color=0xFF0000  
+                )  
+                await msg.edit(embed=embed)
+                subprocess.run(["docker", "kill", container_id], stderr=subprocess.DEVNULL)  
+                subprocess.run(["docker", "rm", container_id], stderr=subprocess.DEVNULL)
+                
+        except subprocess.CalledProcessError as e:  
+            embed = discord.Embed(  
+                title=f"❌ Deployment Failed {random.choice(ERROR_ANIMATION)}",  
+                description=f"```diff\n- Error during deployment:\n{e}\n```",  
+                color=0xFF0000  
+            )  
+            await msg.edit(embed=embed)
+            await send_to_logs(f"💥 Deployment failed for {user.mention} by {interaction.user.mention}: {e}")
+            
+    except Exception as e:
+        print(f"Error in deploy command: {e}")
+        try:
+            embed = discord.Embed(
+                title="💥 Critical Error",
+                description="```diff\n- An unexpected error occurred\n- Please try again later\n```",
+                color=0xFF0000
+            )
+            await interaction.followup.send(embed=embed)
+        except:
+            pass
 
-                success, out = await run_docker_command(container_id, ["bash", "-c", "apt-get update"], timeout=120)
-                if not success:
-                    raise Exception("apt-get update failed: " + out[:400])
+@bot.tree.command(name="start", description="🟢 Start your cloud instance")
+@app_commands.describe(container_id="Your instance ID (first 4+ characters)")
+async def start_server(interaction: discord.Interaction, container_id: str):
+    try:
+        user = str(interaction.user)
+        container_info = None
+        ssh_command = None
+        
+        if not os.path.exists(database_file):
+            embed = discord.Embed(  
+                title="📭 No Instances Found",  
+                description="You don't have any active instances!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return
 
-                packages = [
-                    "tmate", "neofetch", "screen", "wget", "curl", "htop", "nano", "vim",
-                    "openssh-server", "sudo", "ufw", "git", "systemd", "systemd-sysv"
-                ]
-                # install
-                pkg_cmd = ["bash", "-c", "DEBIAN_FRONTEND=noninteractive apt-get install -y " + " ".join(shlex.quote(p) for p in packages)]
-                success, out = await run_docker_command(container_id, pkg_cmd, timeout=PACKAGE_INSTALL_TIMEOUT)
-                if not success:
-                    raise Exception("Package installation failed: " + out[:800])
-            except Exception as e:
-                # rollback - remove container and inform
-                try:
-                    subprocess.run(["docker", "kill", container_id], stderr=subprocess.DEVNULL)
-                    subprocess.run(["docker", "rm", container_id], stderr=subprocess.DEVNULL)
-                except:
-                    pass
-                await status_msg.edit(embed=discord.Embed(title="❌ Deployment Failed", description=str(e), color=0xFF0000))
-                await send_to_logs(f"❌ Deployment failed for {user} by {interaction.user}: {e}")
+        with open(database_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split('|')
+                if len(parts) >= 3 and user == parts[0] and container_id in parts[1]:
+                    container_info = parts[1]
+                    ssh_command = parts[2]
+                    break
+
+        if not container_info:  
+            embed = discord.Embed(  
+                title="🔍 Instance Not Found",  
+                description="No instance found with that ID that belongs to you!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return  
+
+        # Initial response with loading animation
+        embed = discord.Embed(
+            title=f"🔌 Starting Instance {container_info[:12]}",
+            description="```diff\n+ Powering up your cloud instance...\n```",
+            color=EMBED_COLOR
+        )
+        await interaction.response.send_message(embed=embed)
+        msg = await interaction.original_response()
+        
+        await animate_message("Booting System", embed, LOADING_ANIMATION, 2)
+
+        try:  
+            check_cmd = subprocess.run(
+                ["docker", "inspect", "--format='{{.State.Status}}'", container_info], 
+                capture_output=True, text=True
+            )
+            
+            if check_cmd.returncode != 0:
+                embed = discord.Embed(  
+                    title="❌ Container Not Found",  
+                    description=f"Container `{container_info[:12]}` doesn't exist in Docker!",
+                    color=0xFF0000  
+                )  
+                await msg.edit(embed=embed)
+                remove_from_database(ssh_command)
                 return
-        else:
-            # not apt-based - skip installation (user can provide custom image)
+            
+            subprocess.run(["docker", "start", container_info], check=True)
+            
             try:
-                await status_msg.edit(embed=discord.Embed(title="⚠️ Skipping package install", description="OS not apt-based; manual setup may be required", color=0xFFA500))
+                embed.description = "```diff\n+ Generating new SSH connection...\n```"
+                await msg.edit(embed=embed)
+                
+                exec_cmd = await asyncio.create_subprocess_exec(
+                    "docker", "exec", container_info, "tmate", "-F",
+                    stdout=asyncio.subprocess.PIPE, 
+                    stderr=asyncio.subprocess.PIPE
+                )  
+                ssh_session_line = await capture_ssh_session_line(exec_cmd)
+                
+                if ssh_session_line:
+                    remove_from_database(ssh_command)
+                    add_to_database(user, container_info, ssh_session_line)
+                    
+                    try:
+                        dm_embed = discord.Embed(  
+                            title=f"🟢 Instance Started {random.choice(SUCCESS_ANIMATION)}",  
+                            description=f"**Your instance is now running!**\n\n**🔑 New SSH Command:**\n```{ssh_session_line}```",  
+                            color=0x00FF00  
+                        )
+                        dm_embed.add_field(
+                            name="💡 Note",
+                            value="The old SSH connection is no longer valid",
+                            inline=False
+                        )
+                        await interaction.user.send(embed=dm_embed)
+                    except discord.Forbidden:
+                        pass
+                    
+                    embed = discord.Embed(  
+                        title=f"🟢 Instance Started {random.choice(SUCCESS_ANIMATION)}",  
+                        description=f"Instance `{container_info[:12]}` is now running!\n📩 Check your DMs for new connection details.",
+                        color=0x00FF00  
+                    )  
+                else:
+                    embed = discord.Embed(  
+                        title="⚠️ SSH Refresh Failed",  
+                        description=f"Instance `{container_info[:12]}` started but couldn't get new SSH details.",
+                        color=0xFFA500  
+                    )
+            except Exception as e:
+                print(f"Error getting new SSH session: {e}")
+                embed = discord.Embed(  
+                    title="🟢 Instance Started",  
+                    description=f"Instance `{container_info[:12]}` is running!\n⚠️ Could not refresh SSH details.",
+                    color=0xFFA500  
+                )
+            
+            await msg.edit(embed=embed)  
+            await send_to_logs(f"🟢 {interaction.user.mention} started instance `{container_info[:12]}`")
+            
+        except subprocess.CalledProcessError as e:  
+            embed = discord.Embed(  
+                title=f"❌ Startup Failed {random.choice(ERROR_ANIMATION)}",  
+                description=f"```diff\n- Error starting container:\n{e.stderr if e.stderr else e.stdout}\n```",  
+                color=0xFF0000  
+            )  
+            await msg.edit(embed=embed)
+            
+    except Exception as e:
+        print(f"Error in start_server: {e}")
+        try:
+            await interaction.response.send_message(
+                "❌ An error occurred while processing your request.", 
+                ephemeral=True
+            )
+        except:
+            pass
+
+@bot.tree.command(name="stop", description="🛑 Stop your cloud instance")
+@app_commands.describe(container_id="Your instance ID (first 4+ characters)")
+async def stop_server(interaction: discord.Interaction, container_id: str):
+    try:
+        user = str(interaction.user)
+        container_info = None
+        
+        if not os.path.exists(database_file):
+            embed = discord.Embed(  
+                title="📭 No Instances Found",  
+                description="You don't have any active instances!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return
+
+        with open(database_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split('|')
+                if len(parts) >= 3 and user == parts[0] and container_id in parts[1]:
+                    container_info = parts[1]
+                    break
+
+        if not container_info:  
+            embed = discord.Embed(  
+                title="🔍 Instance Not Found",  
+                description="No instance found with that ID that belongs to you!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return  
+
+        # Initial response with loading animation
+        embed = discord.Embed(
+            title=f"⏳ Stopping Instance {container_info[:12]}",
+            description="```diff\n+ Shutting down your cloud instance...\n```",
+            color=EMBED_COLOR
+        )
+        await interaction.response.send_message(embed=embed)
+        msg = await interaction.original_response()
+        
+        await animate_message("Stopping Services", embed, LOADING_ANIMATION, 2)
+
+        try:  
+            check_cmd = subprocess.run(
+                ["docker", "inspect", container_info], 
+                capture_output=True, text=True
+            )
+            
+            if check_cmd.returncode != 0:
+                embed = discord.Embed(  
+                    title="❌ Container Not Found",  
+                    description=f"Container `{container_info[:12]}` doesn't exist in Docker!",
+                    color=0xFF0000  
+                )  
+                await msg.edit(embed=embed)
+                remove_from_database(container_info)
+                return
+            
+            subprocess.run(["docker", "stop", container_info], check=True)
+            
+            embed = discord.Embed(  
+                title=f"🛑 Instance Stopped {random.choice(SUCCESS_ANIMATION)}",  
+                description=f"Instance `{container_info[:12]}` has been successfully stopped!",
+                color=0x00FF00  
+            )  
+            await msg.edit(embed=embed)  
+            await send_to_logs(f"🛑 {interaction.user.mention} stopped instance `{container_info[:12]}`")
+            
+        except subprocess.CalledProcessError as e:  
+            embed = discord.Embed(  
+                title=f"❌ Stop Failed {random.choice(ERROR_ANIMATION)}",  
+                description=f"```diff\n- Error stopping container:\n{e.stderr if e.stderr else e.stdout}\n```",  
+                color=0xFF0000  
+            )  
+            await msg.edit(embed=embed)
+            
+    except Exception as e:
+        print(f"Error in stop_server: {e}")
+        try:
+            await interaction.response.send_message(
+                "❌ An error occurred while processing your request.", 
+                ephemeral=True
+            )
+        except:
+            pass
+
+@bot.tree.command(name="restart", description="🔄 Restart your cloud instance")
+@app_commands.describe(container_id="Your instance ID (first 4+ characters)")
+async def restart_server(interaction: discord.Interaction, container_id: str):
+    try:
+        user = str(interaction.user)
+        container_info = None
+        ssh_command = None
+        
+        if not os.path.exists(database_file):
+            embed = discord.Embed(  
+                title="📭 No Instances Found",  
+                description="You don't have any active instances!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return
+
+        with open(database_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split('|')
+                if len(parts) >= 3 and user == parts[0] and container_id in parts[1]:
+                    container_info = parts[1]
+                    ssh_command = parts[2]
+                    break
+
+        if not container_info:  
+            embed = discord.Embed(  
+                title="🔍 Instance Not Found",  
+                description="No instance found with that ID that belongs to you!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return  
+
+        # Initial response with loading animation
+        embed = discord.Embed(
+            title=f"🔄 Restarting Instance {container_info[:12]}",
+            description="```diff\n+ Rebooting your cloud instance...\n```",
+            color=EMBED_COLOR
+        )
+        await interaction.response.send_message(embed=embed)
+        msg = await interaction.original_response()
+        
+        await animate_message("Restarting Services", embed, LOADING_ANIMATION, 2)
+
+        try:  
+            check_cmd = subprocess.run(
+                ["docker", "inspect", container_info], 
+                capture_output=True, text=True
+            )
+            
+            if check_cmd.returncode != 0:
+                embed = discord.Embed(  
+                    title="❌ Container Not Found",  
+                    description=f"Container `{container_info[:12]}` doesn't exist in Docker!",
+                    color=0xFF0000  
+                )  
+                await msg.edit(embed=embed)
+                remove_from_database(ssh_command)
+                return
+            
+            subprocess.run(["docker", "restart", container_info], check=True)
+            
+            embed.description = "```diff\n+ Generating new SSH connection...\n```"
+            await msg.edit(embed=embed)
+            
+            try:
+                exec_cmd = await asyncio.create_subprocess_exec(
+                    "docker", "exec", container_info, "tmate", "-F",
+                    stdout=asyncio.subprocess.PIPE, 
+                    stderr=asyncio.subprocess.PIPE
+                )  
+                ssh_session_line = await capture_ssh_session_line(exec_cmd)
+                
+                if ssh_session_line:
+                    remove_from_database(ssh_command)
+                    add_to_database(user, container_info, ssh_session_line)
+                    
+                    try:
+                        dm_embed = discord.Embed(  
+                            title=f"🔄 Instance Restarted {random.choice(SUCCESS_ANIMATION)}",  
+                            description=f"**Your instance has been restarted!**\n\n**🔑 New SSH Command:**\n```{ssh_session_line}```",  
+                            color=0x00FF00  
+                        )
+                        dm_embed.add_field(
+                            name="💡 Note",
+                            value="The old SSH connection is no longer valid",
+                            inline=False
+                        )
+                        await interaction.user.send(embed=dm_embed)
+                    except discord.Forbidden:
+                        pass
+                    
+                    embed = discord.Embed(  
+                        title=f"🔄 Instance Restarted {random.choice(SUCCESS_ANIMATION)}",  
+                        description=f"Instance `{container_info[:12]}` has been restarted!\n📩 Check your DMs for new connection details.",
+                        color=0x00FF00  
+                    )  
+                else:
+                    embed = discord.Embed(  
+                        title="⚠️ SSH Refresh Failed",  
+                        description=f"Instance `{container_info[:12]}` restarted but couldn't get new SSH details.",
+                        color=0xFFA500  
+                    )
+            except Exception as e:
+                print(f"Error getting new SSH session: {e}")
+                embed = discord.Embed(  
+                    title="🔄 Instance Restarted",  
+                    description=f"Instance `{container_info[:12]}` has been restarted!\n⚠️ Could not refresh SSH details.",
+                    color=0xFFA500  
+                )
+            
+            await msg.edit(embed=embed)  
+            await send_to_logs(f"🔄 {interaction.user.mention} restarted instance `{container_info[:12]}`")
+            
+        except subprocess.CalledProcessError as e:  
+            embed = discord.Embed(  
+                title=f"❌ Restart Failed {random.choice(ERROR_ANIMATION)}",  
+                description=f"```diff\n- Error restarting container:\n{e.stderr if e.stderr else e.stdout}\n```",  
+                color=0xFF0000  
+            )  
+            await msg.edit(embed=embed)
+            
+    except Exception as e:
+        print(f"Error in restart_server: {e}")
+        try:
+            await interaction.response.send_message(
+                "❌ An error occurred while processing your request.", 
+                ephemeral=True
+            )
+        except:
+            pass
+
+@bot.tree.command(name="remove", description="❌ Permanently delete your cloud instance")
+@app_commands.describe(container_id="Your instance ID (first 4+ characters)")
+async def remove_server(interaction: discord.Interaction, container_id: str):
+    try:
+        user = str(interaction.user)
+        container_info = None
+        ssh_command = None
+        
+        if not os.path.exists(database_file):
+            embed = discord.Embed(  
+                title="📭 No Instances Found",  
+                description="You don't have any active instances!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return
+
+        with open(database_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split('|')
+                if len(parts) >= 3 and user == parts[0] and container_id in parts[1]:
+                    container_info = parts[1]
+                    ssh_command = parts[2]
+                    break
+
+        if not container_info:  
+            embed = discord.Embed(  
+                title="🔍 Instance Not Found",  
+                description="No instance found with that ID that belongs to you!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return  
+
+        # Confirmation embed
+        embed = discord.Embed(
+            title="⚠️ Confirm Deletion",
+            description=f"Are you sure you want to **permanently delete** instance `{container_info[:12]}`?",
+            color=0xFFA500
+        )
+        embed.set_footer(text="This action cannot be undone!")
+        
+        # Add buttons for confirmation
+        class ConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=30)
+                self.value = None
+            
+            @discord.ui.button(label="✅ Confirm", style=discord.ButtonStyle.green)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                self.value = True
+                self.stop()
+                await interaction.response.defer()
+                
+                # Show loading animation
+                processing_embed = discord.Embed(
+                    title="⏳ Deleting Instance",
+                    description="```diff\n- Removing container and all its data...\n```",
+                    color=EMBED_COLOR
+                )
+                await interaction.followup.send(embed=processing_embed)
+                msg = await interaction.original_response()
+                
+                try:  
+                    check_cmd = subprocess.run(
+                        ["docker", "inspect", container_info], 
+                        capture_output=True, text=True
+                    )
+                    
+                    if check_cmd.returncode != 0:
+                        embed = discord.Embed(  
+                            title="❌ Container Not Found",  
+                            description=f"Container `{container_info[:12]}` doesn't exist in Docker!",
+                            color=0xFF0000  
+                        )  
+                        await msg.edit(embed=embed)
+                        remove_from_database(ssh_command)
+                        return
+                    
+                    subprocess.run(["docker", "stop", container_info], check=True)  
+                    subprocess.run(["docker", "rm", container_info], check=True)  
+                    
+                    remove_from_database(ssh_command)
+                    
+                    embed = discord.Embed(  
+                        title=f"🗑️ Instance Deleted {random.choice(SUCCESS_ANIMATION)}",  
+                        description=f"Instance `{container_info[:12]}` has been permanently deleted!",
+                        color=0x00FF00  
+                    )  
+                    await msg.edit(embed=embed)  
+                    await send_to_logs(f"❌ {interaction.user.mention} deleted instance `{container_info[:12]}`")
+                    
+                except subprocess.CalledProcessError as e:  
+                    embed = discord.Embed(  
+                        title=f"❌ Deletion Failed {random.choice(ERROR_ANIMATION)}",  
+                        description=f"```diff\n- Error deleting container:\n{e.stderr if e.stderr else e.stdout}\n```",  
+                        color=0xFF0000  
+                    )  
+                    await msg.edit(embed=embed)
+            
+            @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                self.value = False
+                self.stop()
+                embed = discord.Embed(
+                    title="Deletion Cancelled",
+                    description=f"Instance `{container_info[:12]}` was not deleted.",
+                    color=0x00FF00
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+        
+        view = ConfirmView()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        
+    except Exception as e:
+        print(f"Error in remove_server: {e}")
+        try:
+            await interaction.response.send_message(
+                "❌ An error occurred while processing your request.", 
+                ephemeral=True
+            )
+        except:
+            pass
+
+@bot.tree.command(name="regen-ssh", description="🔄 Regenerate SSH connection for your instance")
+@app_commands.describe(container_id="Your instance ID (first 4+ characters)")
+async def regen_ssh(interaction: discord.Interaction, container_id: str):
+    try:
+        user = str(interaction.user)
+        container_info = None
+        old_ssh_command = None
+        
+        if not os.path.exists(database_file):
+            embed = discord.Embed(  
+                title="📭 No Instances Found",  
+                description="You don't have any active instances!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return
+
+        with open(database_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split('|')
+                if len(parts) >= 3 and user == parts[0] and container_id in parts[1]:
+                    container_info = parts[1]
+                    old_ssh_command = parts[2]
+                    break
+
+        if not container_info:  
+            embed = discord.Embed(  
+                title="🔍 Instance Not Found",  
+                description="No instance found with that ID that belongs to you!",  
+                color=EMBED_COLOR  
+            )  
+            await interaction.response.send_message(embed=embed, ephemeral=True)  
+            return  
+
+        try:  
+            check_cmd = subprocess.run(
+                ["docker", "inspect", "--format='{{.State.Status}}'", container_info], 
+                capture_output=True, text=True
+            )
+            
+            if check_cmd.returncode != 0:
+                embed = discord.Embed(  
+                    title="❌ Container Not Found",  
+                    description=f"Container `{container_info[:12]}` doesn't exist in Docker!",
+                    color=0xFF0000  
+                )  
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                remove_from_database(old_ssh_command)
+                return
+            
+            container_status = check_cmd.stdout.strip().strip("'")
+            if container_status != "running":
+                embed = discord.Embed(  
+                    title="⚠️ Instance Not Running",  
+                    description=f"Container `{container_info[:12]}` is not running. Start it first with `/start`.",
+                    color=0xFFA500  
+                )  
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+            
+            embed = discord.Embed(
+                title="⚙️ Regenerating SSH Connection",
+                description=f"```diff\n+ Generating new SSH details for {container_info[:12]}...\n```",
+                color=EMBED_COLOR
+            )
+            await interaction.response.send_message(embed=embed)
+            msg = await interaction.original_response()
+            
+            await animate_message("Creating New Session", embed, LOADING_ANIMATION, 2)
+
+            try:
+                subprocess.run(
+                    ["docker", "exec", container_info, "pkill", "tmate"], 
+                    stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
+                )
+                
+                exec_cmd = await asyncio.create_subprocess_exec(
+                    "docker", "exec", container_info, "tmate", "-F",
+                    stdout=asyncio.subprocess.PIPE, 
+                    stderr=asyncio.subprocess.PIPE
+                )  
+                ssh_session_line = await capture_ssh_session_line(exec_cmd)
+                
+                if ssh_session_line:
+                    remove_from_database(old_ssh_command)
+                    add_to_database(user, container_info, ssh_session_line)
+                    
+                    try:
+                        dm_embed = discord.Embed(  
+                            title=f"🔄 SSH Regenerated {random.choice(SUCCESS_ANIMATION)}",  
+                            description=f"**New SSH Connection Details:**\n```{ssh_session_line}```",  
+                            color=0x00FF00  
+                        )
+                        dm_embed.add_field(
+                            name="⚠️ Important",
+                            value="The old SSH connection is no longer valid",
+                            inline=False
+                        )
+                        await interaction.user.send(embed=dm_embed)
+                    except discord.Forbidden:
+                        pass
+                    
+                    embed = discord.Embed(  
+                        title=f"✅ SSH Regenerated {random.choice(SUCCESS_ANIMATION)}",  
+                        description=f"New SSH details generated for `{container_info[:12]}`!\n📩 Check your DMs for the new connection.",
+                        color=0x00FF00  
+                    )  
+                else:
+                    embed = discord.Embed(  
+                        title="⚠️ SSH Regeneration Failed",  
+                        description=f"Could not generate new SSH details for `{container_info[:12]}`.\nTry again later.",
+                        color=0xFFA500  
+                    )
+            except Exception as e:
+                print(f"Error regenerating SSH: {e}")
+                embed = discord.Embed(  
+                    title="❌ SSH Regeneration Failed",  
+                    description=f"An error occurred while regenerating SSH for `{container_info[:12]}`.",
+                    color=0xFF0000  
+                )
+            
+            await msg.edit(embed=embed)
+            
+            if ssh_session_line:
+                await send_to_logs(f"🔄 {interaction.user.mention} regenerated SSH for instance `{container_info[:12]}`")
+            
+        except subprocess.CalledProcessError as e:  
+            embed = discord.Embed(  
+                title="❌ Error Regenerating SSH",  
+                description=f"```diff\n- Error:\n{e.stderr if e.stderr else e.stdout}\n```",  
+                color=0xFF0000  
+            )  
+            try:
+                await msg.edit(embed=embed)
             except:
                 pass
-
-        # configure SSH user (best-effort)
+            
+    except Exception as e:
+        print(f"Error in regen_ssh: {e}")
         try:
-            user_cmds = [
-                f"useradd -m -s /bin/bash {username} || true",
-                f"echo '{username}:{ssh_password}' | chpasswd || true",
-                f"usermod -aG sudo {username} || true",
-                "sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config || true",
-                "sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config || true",
-                "service ssh restart || service sshd restart || true"
-            ]
-            for c in user_cmds:
-                success, out = await run_docker_command(container_id, ["bash", "-c", c], timeout=30)
-                if not success:
-                    logger.warning(f"SSH setup step failed for {container_id}: {c} -> {out[:200]}")
-        except Exception as e:
-            logger.warning("SSH config error: %s", e)
-
-        # set hostname, watermark, motd
-        try:
-            hostname_cmd = f"echo 'eaglenode-{vps_id}' > /etc/hostname && hostname eaglenode-{vps_id}"
-            await run_docker_command(container_id, ["bash", "-c", hostname_cmd])
-            await run_docker_command(container_id, ["bash", "-c", f"echo '{WATERMARK}' > /etc/machine-info || true"])
-            await run_docker_command(container_id, ["bash", "-c", f"echo '{WELCOME_MESSAGE}' > /etc/motd || true"])
-            await run_docker_command(container_id, ["bash", "-c", f"chown -R {username}:{username} /home/{username} || true"])
-            await run_docker_command(container_id, ["bash", "-c", f"chmod 700 /home/{username} || true"])
-        except Exception as e:
-            logger.warning("branding error: %s", e)
-
-        # attempt to start tmate and capture ssh session (best-effort)
-        ssh_session_line = "N/A"
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "tmate", "-F",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            await interaction.response.send_message(
+                "❌ An error occurred while processing your request.", 
+                ephemeral=True
             )
-            # read lines until we capture ssh session text or timeout
-            try:
-                ssh_session_line = await asyncio.wait_for(capture_ssh_session_line(proc), timeout=40)
-            except asyncio.TimeoutError:
-                ssh_session_line = None
-            if not ssh_session_line:
-                # fallback try to fetch tmate display messages
-                ssh_session_line = "tmate session not available. Connect to container directly."
-        except Exception:
-            ssh_session_line = "tmate not available"
+        except:
+            pass
 
-        # save to DB
-        add_to_database_row(str(user), container_id, ssh_session_line, os, memory, cpu_count, disk, username)
-
-        # final embed
-        embed = discord.Embed(title="🎉 EagleNode VPS Created Successfully!", color=discord.Color.green())
-        embed.add_field(name="🆔 VPS ID", value=vps_id)
-        embed.add_field(name="💾 Memory", value=f"{memory} GB")
-        embed.add_field(name="⚡ CPU", value=f"{cpu_count} cores")
-        embed.add_field(name="💿 Disk", value=f"{disk} GB")
-        embed.add_field(name="👤 Username", value=username)
-        embed.add_field(name="🔑 Password", value=f"||{ssh_password}||", inline=False)
-        embed.add_field(name="🔌 SSH Session", value=f"```{ssh_session_line}```", inline=False)
-        embed.set_footer(text=WATERMARK)
-
-        # DM the owner
-        try:
-            await user.send(embed=embed)
-            await status_msg.edit(content=f"✅ VPS ready! Check your DM, {user.mention}.")
-        except discord.Forbidden:
-            await status_msg.edit(content="✅ VPS created, but I couldn't DM the user. Please enable DMs from server members.")
-
-    except subprocess.CalledProcessError as e:
-        await status_msg.edit(content=f"❌ Deployment failed: {e}")
-        logger.exception("CalledProcessError during deploy")
-    except Exception as e:
-        await status_msg.edit(content=f"❌ Deployment failed: {e}")
-        logger.exception("Exception during deploy")
-
-# ----------------------------
-# /delete-user-container (admin)
-# ----------------------------
-@bot.tree.command(name="delete-user-container", description="❌ [ADMIN] Force delete a container by ID")
-@app_commands.describe(container_id="ID (prefix ok)")
-async def delete_user_container(interaction: discord.Interaction, container_id: str):
-    if not await is_admin_role_only(interaction):
-        await interaction.response.send_message("🚫 Permission denied. Admins only.", ephemeral=True)
-        return
-    await interaction.response.send_message(f"⚠️ Attempting to delete `{container_id}`...", ephemeral=True)
-    try:
-        # find real container from db
-        parts = find_server_by_prefix(container_id)
-        if not parts:
-            await interaction.followup.send("❌ Could not find container in database.", ephemeral=True)
-            return
-        owner = parts[0]
-        real_id = parts[1]
-        # stop & rm
-        subprocess.run(["docker", "stop", real_id], check=False)
-        subprocess.run(["docker", "rm", real_id], check=False)
-        remove_from_database_by_id(real_id)
-        await interaction.followup.send(f"✅ Deleted `{real_id[:12]}` (owner: `{owner}`).", ephemeral=True)
-        await send_to_logs(f"💥 {interaction.user} force-deleted container `{real_id[:12]}` owned by `{owner}`")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error deleting: {e}", ephemeral=True)
-
-# ----------------------------
-# /list (user)
-# ----------------------------
-@bot.tree.command(name="list", description="📜 List your VPS instances")
+@bot.tree.command(name="list", description="📜 List your cloud instances")
 async def list_servers(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    owner = str(interaction.user)
-    servers = get_user_servers(owner)
-    if not servers:
-        await interaction.followup.send("📭 You have no active instances.", ephemeral=True)
-        return
-    embed = discord.Embed(title=f"📋 Your Cloud Instances ({len(servers)})", color=EMBED_COLOR)
-    for parts in servers:
-        container_id = parts[1]
-        os_name = parts[4]
-        memory = parts[5]
-        cpu = parts[6]
-        username = parts[8] if len(parts) > 8 else "user"
-        # inspect status
-        try:
-            out = subprocess.check_output(["docker", "inspect", "--format={{.State.Status}}", container_id], stderr=subprocess.DEVNULL).decode().strip().strip("'")
-            status_emoji = "🟢" if out == "running" else "🔴"
-            status_text = f"{status_emoji} {out}"
-        except Exception:
-            status_text = "🔴 Unknown"
-        embed.add_field(name=f"🖥️ `{container_id[:12]}`", value=f"▫️ OS: {os_name}\n▫️ Status: {status_text}\n▫️ RAM: {memory}GB | CPU: {cpu} cores", inline=False)
-    await interaction.followup.send(embed=embed, ephemeral=True)
-
-# ----------------------------
-# /list-all (admin)
-# ----------------------------
-@bot.tree.command(name="list-all", description="📋 List all VPS instances (admin)")
-async def list_all(interaction: discord.Interaction):
-    if not await is_admin_role_only(interaction):
-        await interaction.response.send_message("🚫 Permission denied. Admins only.", ephemeral=True)
-        return
-    await interaction.response.defer()
-    rows = get_all_servers()
-    host_stats = get_system_resources()
-    container_stats = get_container_stats()
-    embed = discord.Embed(title=f"📊 All Instances ({len(rows)})", color=EMBED_COLOR)
-    embed.add_field(name="Host Resources", value=f"CPU: {host_stats['cpu']}%\nMemory: {host_stats['memory']['used']}GB/{host_stats['memory']['total']}GB ({host_stats['memory']['percent']}%)\nDisk: {host_stats['disk']['used']}GB/{host_stats['disk']['total']}GB ({host_stats['disk']['percent']}%)", inline=False)
-    for parts in rows:
-        owner = parts[0]
-        cid = parts[1]
-        os_name = parts[4]
-        mem = parts[5]
-        cpu = parts[6]
-        stats = container_stats.get(cid, {'cpu': '0.00%', 'mem': '0B / 0B'})
-        try:
-            out = subprocess.check_output(["docker", "inspect", "--format={{.State.Status}}", cid], stderr=subprocess.DEVNULL).decode().strip().strip("'")
-            status_emoji = "🟢" if out == "running" else "🔴"
-            status_text = f"{status_emoji} {out}"
-        except Exception:
-            status_text = "🔴 Unknown"
-        embed.add_field(name=f"🖥️ `{cid[:12]}`", value=f"Owner: `{owner}`\nOS: {os_name}\nStatus: {status_text}\nCPU: {stats['cpu']}\nRAM: {stats['mem']}", inline=False)
-    await interaction.followup.send(embed=embed)
-
-# ----------------------------
-# /manage command - opens an interactive view
-# ----------------------------
-class ManageView(discord.ui.View):
-    def __init__(self, container_id: str, owner_str: str):
-        super().__init__(timeout=120)
-        self.container_id = container_id
-        self.owner_str = owner_str
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-
-    @discord.ui.button(label="Start", style=discord.ButtonStyle.green)
-    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            subprocess.run(["docker", "start", self.container_id], check=False)
-            update_last_seen(self.container_id)
-            await interaction.response.edit_message(content=f"✅ Started `{self.container_id[:12]}`", view=None)
-            await send_to_logs(f"🟢 {interaction.user} started {self.container_id[:12]}")
-        except Exception as e:
-            await interaction.response.edit_message(content=f"❌ Start failed: {e}", view=None)
-
-    @discord.ui.button(label="Stop", style=discord.ButtonStyle.red)
-    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            subprocess.run(["docker", "stop", self.container_id], check=False)
-            await interaction.response.edit_message(content=f"🛑 Stopped `{self.container_id[:12]}`", view=None)
-            await send_to_logs(f"🛑 {interaction.user} stopped {self.container_id[:12]}")
-        except Exception as e:
-            await interaction.response.edit_message(content=f"❌ Stop failed: {e}", view=None)
-
-    @discord.ui.button(label="Restart", style=discord.ButtonStyle.blurple)
-    async def restart_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            subprocess.run(["docker", "restart", self.container_id], check=False)
-            update_last_seen(self.container_id)
-            await interaction.response.edit_message(content=f"🔄 Restarted `{self.container_id[:12]}`", view=None)
-            await send_to_logs(f"🔄 {interaction.user} restarted {self.container_id[:12]}")
-        except Exception as e:
-            await interaction.response.edit_message(content=f"❌ Restart failed: {e}", view=None)
-
-    @discord.ui.button(label="Regen SSH", style=discord.ButtonStyle.gray)
-    async def regen_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # kill existing tmates and start a new one, then capture ssh
-        try:
-            # pkill tmate
-            await run_docker_command(self.container_id, ["bash", "-c", "pkill tmate || true"], timeout=10)
-            proc = await asyncio.create_subprocess_exec("docker", "exec", self.container_id, "tmate", "-F", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            ssh_line = None
-            try:
-                ssh_line = await asyncio.wait_for(capture_ssh_session_line(proc), timeout=40)
-            except asyncio.TimeoutError:
-                ssh_line = None
-            if not ssh_line:
-                ssh_line = "tmate session unavailable"
-            # update db
-            remove_from_database_by_id(self.container_id)
-            add_to_database_row(self.owner_str, self.container_id, ssh_line, "unknown-os", "0", "0", "0", "user")
-            update_last_seen(self.container_id)
-            await interaction.response.edit_message(content=f"🔑 New SSH: ```{ssh_line}```", view=None)
-            await send_to_logs(f"🔄 {interaction.user} regenerated SSH for {self.container_id[:12]}")
-        except Exception as e:
-            await interaction.response.edit_message(content=f"❌ Failed to regen SSH: {e}", view=None)
-
-    @discord.ui.button(label="Delete", style=discord.ButtonStyle.red)
-    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            subprocess.run(["docker", "stop", self.container_id], check=False)
-            subprocess.run(["docker", "rm", self.container_id], check=False)
-            remove_from_database_by_id(self.container_id)
-            await interaction.response.edit_message(content=f"🗑️ Deleted `{self.container_id[:12]}`", view=None)
-            await send_to_logs(f"🗑️ {interaction.user} deleted {self.container_id[:12]}")
-        except Exception as e:
-            await interaction.response.edit_message(content=f"❌ Delete failed: {e}", view=None)
-
-@bot.tree.command(name="manage", description="⚙️ Manage your VPS (open a control panel)")
-@app_commands.describe(container_id="Your container ID (prefix allowed)")
-async def manage(interaction: discord.Interaction, container_id: str):
-    await interaction.response.defer()
-    parts = find_server_by_prefix(container_id)
-    if not parts:
-        await interaction.followup.send("🔍 Container not found (prefix ok).", ephemeral=True)
-        return
-    owner = parts[0]
-    if owner != str(interaction.user) and not await is_admin_role_only(interaction):
-        await interaction.followup.send("🚫 You don't own this container.", ephemeral=True)
-        return
-    real_id = parts[1]
-    view = ManageView(real_id, owner)
-    await interaction.followup.send(f"Control panel for `{real_id[:12]}` — choose an action:", view=view, ephemeral=True)
-
-# ----------------------------
-# /ping
-# ----------------------------
-@bot.tree.command(name="ping", description="🏓 Check bot latency and uptime")
-async def ping(interaction: discord.Interaction):
-    latency = round(bot.latency * 1000)
-    up = datetime.utcnow() - start_time
-    embed = discord.Embed(title="🏓 Pong!", color=EMBED_COLOR)
-    embed.add_field(name="Latency", value=f"{latency}ms")
-    embed.add_field(name="Uptime", value=str(up).split(".")[0])
-    await interaction.response.send_message(embed=embed)
-
-# ----------------------------
-# Utility: send to logs channel
-# ----------------------------
-async def send_to_logs(message: str):
     try:
-        ch = bot.get_channel(LOGS_CHANNEL_ID)
-        if ch:
-            ts = datetime.now().strftime("%H:%M:%S")
-            await ch.send(f"`[{ts}]` {message}")
-    except Exception as e:
-        logger.warning("Failed send_to_logs: %s", e)
+        user = str(interaction.user)
+        servers = get_user_servers(user)
+        
+        if not servers:
+            embed = discord.Embed(
+                title="📭 No Instances Found",
+                description="You don't have any active instances.",
+                color=EMBED_COLOR
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
 
-# ----------------------------
-# Run bot
-# ----------------------------
-if __name__ == "__main__":
-    if TOKEN == "" or ADMIN_ROLE_ID == 1416372125953949758:
-        print("⚠️ Please set TOKEN, LOGS_CHANNEL_ID and ADMIN_ROLE_ID at the top of the file before running.")
-    bot.run(TOKEN)
+        embed = discord.Embed(
+            title=f"📋 Your Cloud Instances ({len(servers)}/{SERVER_LIMIT})",
+            color=EMBED_COLOR
+        )
+        
+        for server in servers:
+            parts = server.split('|')
+            if len(parts) < 3:
+                continue
+                
+            container_id = parts[1]
+            os_type = "Unknown"
+            
+            for os_id, os_data in OS_OPTIONS.items():
+                if os_id in parts[2].lower():
+                    os_type = f"{os_data['emoji']} {os_data['name']}"
+                    break
+                    
+            # Check if container is running
+            try:
+                status = subprocess.check_output(
+                    ["docker", "inspect", "--format='{{.State.Status}}'", container_id],
+                    stderr=subprocess.DEVNULL
+                ).decode('utf-8').strip().strip("'")
+                
+                status_emoji = "🟢" if status == "running" else "🔴"
+                status_text = f"{status_emoji} {status.capitalize()}"
+            except:
+                status_text = "🔴 Unknown"
+                    
+            embed.add_field(
+                name=f"🖥️ Instance `{container_id[:12]}`",
+                value=(
+                    f"▫️ **OS**: {os_type}\n"
+                    f"▫️ **Status**: {status_text}\n"
+                    f"▫️ **ID**: `{container_id[:12]}`"
+                ),
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Use /start, /stop, or /remove with the instance ID")
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        print(f"Error in list_servers: {e}")
+        try:
+            await interaction.response.send_message("❌ An error occurred while processing your request.", ephemeral=True)
+        except:
+            pass
+
+@bot.tree.command(name="list-all", description="📜 List all deployed instances with resource usage")
+async def list_all_servers(interaction: discord.Interaction):
+    try:
+        # Defer the response to prevent timeout
+        await interaction.response.defer()
+
+        servers = get_all_servers()
+        container_stats = get_container_stats()
+        host_stats = get_system_resources()
+        
+        embed = discord.Embed(
+            title=f"📊 System Overview - All Instances ({len(servers)} total)",
+            color=EMBED_COLOR
+        )
+
+        # Add Host System Resources to the top of the embed
+        cpu_emoji = "🟢" if host_stats['cpu'] < 70 else "🟡" if host_stats['cpu'] < 90 else "🔴"
+        mem_emoji = "🟢" if host_stats['memory']['percent'] < 70 else "🟡" if host_stats['memory']['percent'] < 90 else "🔴"
+        disk_emoji = "🟢" if host_stats['disk']['percent'] < 70 else "🟡" if host_stats['disk']['percent'] < 90 else "🔴"
+        
+        embed.add_field(
+            name="🖥️ Host System Resources",
+            value=(
+                f"{cpu_emoji} **CPU Usage**: {host_stats['cpu']}%\n"
+                f"{mem_emoji} **Memory**: {host_stats['memory']['used']}GB / {host_stats['memory']['total']}GB ({host_stats['memory']['percent']}%)\n"
+                f"{disk_emoji} **Disk**: {host_stats['disk']['used']}GB / {host_stats['disk']['total']}GB ({host_stats['disk']['percent']}%)"
+            ),
+            inline=False
+        )
+        embed.add_field(name="\u200b", value="\u200b", inline=False) # Add a spacer field
+
+        if not servers:
+            embed.add_field(
+                name="📭 No Instances Found",
+                value="There are no active instances.",
+                inline=False
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        for server in servers:
+            parts = server.split('|')
+            if len(parts) < 3:
+                continue
+                
+            user_owner = parts[0]
+            container_id = parts[1]
+            os_type = "Unknown"
+            
+            for os_id, os_data in OS_OPTIONS.items():
+                if os_id in parts[2].lower():
+                    os_type = f"{os_data['emoji']} {os_data['name']}"
+                    break
+
+            stats = container_stats.get(container_id, {'cpu': '0.00%', 'mem_used': '0B', 'mem_limit': '0B'})
+            
+            # Get container status
+            try:
+                status = subprocess.check_output(
+                    ["docker", "inspect", "--format='{{.State.Status}}'", container_id],
+                    stderr=subprocess.DEVNULL
+                ).decode('utf-8').strip().strip("'")
+                
+                status_emoji = "🟢" if status == "running" else "🔴"
+                status_text = f"{status_emoji} {status.capitalize()}"
+            except:
+                status_text = "🔴 Unknown"
+            
+            embed.add_field(
+                name=f"🖥️ Instance `{container_id[:12]}`",
+                value=(
+                    f"▫️ **Owner**: `{user_owner}`\n"
+                    f"▫️ **OS**: {os_type}\n"
+                    f"▫️ **Status**: {status_text}\n"
+                    f"▫️ **CPU**: {stats['cpu']}\n"
+                    f"▫️ **RAM**: {stats['mem_used']} / {stats['mem_limit']}"
+                ),
+                inline=False
+            )
+        
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        print(f"Error in list_all_servers: {e}")
+        try:
+            await interaction.followup.send("❌ An error occurred while processing your request.", ephemeral=True)
+        except:
+            pass
+
+@bot.tree.command(name="delete-user-container", description="❌ [ADMIN] Delete any container by ID")
+@app_commands.describe(container_id="The ID of the container to delete")
+async def delete_user_container(interaction: discord.Interaction, container_id: str):
+    try:
+        if not await is_admin_role_only(interaction):
+            embed = discord.Embed(
+                title="🚫 Permission Denied",
+                description="This command is restricted to administrators only.",
+                color=0xFF0000
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        user_owner, container_info, ssh_command = get_container_info_by_id(container_id)
+        
+        if not container_info:
+            embed = discord.Embed(
+                title="❌ Container Not Found",
+                description=f"Could not find a container with the ID `{container_id[:12]}`.",
+                color=0xFF0000
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+            
+        # Confirmation embed
+        embed = discord.Embed(
+            title="⚠️ Confirm Force Deletion",
+            description=(
+                f"You are about to **force delete** container `{container_info[:12]}`\n"
+                f"**Owner**: {user_owner}\n\n"
+                "This action is irreversible!"
+            ),
+            color=0xFFA500
+        )
+        
+        # Add buttons for confirmation
+        class AdminConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=30)
+                self.value = None
+            
+            @discord.ui.button(label="☠️ Force Delete", style=discord.ButtonStyle.red)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                self.value = True
+                self.stop()
+                await interaction.response.defer()
+                
+                # Show loading animation
+                processing_embed = discord.Embed(
+                    title="⏳ Force Deleting Container",
+                    description="```diff\n- Removing container and all its data...\n```",
+                    color=0xFF0000
+                )
+                await interaction.followup.send(embed=processing_embed)
+                msg = await interaction.original_response()
+                
+                try:
+                    subprocess.run(["docker", "stop", container_info], check=True)
+                    subprocess.run(["docker", "rm", container_info], check=True)
+                    remove_container_from_database_by_id(container_info)
+                    
+                    embed = discord.Embed(
+                        title=f"☠️ Container Force Deleted {random.choice(SUCCESS_ANIMATION)}",
+                        description=(
+                            f"Successfully deleted container `{container_info[:12]}`\n"
+                            f"**Owner**: {user_owner}"
+                        ),
+                        color=0x00FF00
+                    )
+                    await msg.edit(embed=embed)
+                    await send_to_logs(f"💥 {interaction.user.mention} force-deleted container `{container_info[:12]}` owned by `{user_owner}`")
+
+                except subprocess.CalledProcessError as e:
+                    embed = discord.Embd(
+                        title=f"❌ Deletion Failed {random.choice(ERROR_ANIMATION)}",
+                        description=f"```diff\n- Error:\n{e.stderr if e.stderr else e.stdout}\n```",
+                        color=0xFF0000
+                    )
+                    await msg.edit(embed=embed)
+            
+            @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.grey)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                self.value = False
+                self.stop()
+                embed = discord.Embed(
+                    title="Deletion Cancelled",
+                    description=f"Container `{container_info[:12]}` was not deleted.",
+                    color=0x00FF00
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+        
+        view = AdminConfirmView()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        
+    except Exception as e:
+        print(f"Error in delete_user_container: {e}")
+        try:
+            await interaction.response.send_message(
+                "❌ An error occurred while processing your request.",
+                ephemeral=True
+            )
+        except:
+            pass
+
+@bot.tree.command(name="resources", description="📊 Show host system resources")
+async def resources_command(interaction: discord.Interaction):
+    try:
+        resources = get_system_resources()
+        
+        # Determine emojis based on usage levels
+        cpu_emoji = "🟢" if resources['cpu'] < 70 else "🟡" if resources['cpu'] < 90 else "🔴"
+        mem_emoji = "🟢" if resources['memory']['percent'] < 70 else "🟡" if resources['memory']['percent'] < 90 else "🔴"
+        disk_emoji = "🟢" if resources['disk']['percent'] < 70 else "🟡" if resources['disk']['percent'] < 90 else "🔴"
+        
+        embed = discord.Embed(
+            title="📊 Host System Resources",
+            color=EMBED_COLOR
+        )
+        
+        embed.add_field(
+            name=f"{cpu_emoji} CPU Usage",
+            value=f"```{resources['cpu']}%```",
+            inline=True
+        )
+        
+        embed.add_field(
+            name=f"{mem_emoji} Memory",
+            value=f"```{resources['memory']['used']}GB / {resources['memory']['total']}GB\n({resources['memory']['percent']}%)```",
+            inline=True
+        )
+        
+        embed.add_field(
+            name=f"{disk_emoji} Disk Space",
+            value=f"```{resources['disk']['used']}GB / {resources['disk']['total']}GB\n({resources['disk']['percent']}%)```",
+            inline=True
+        )
+        
+        # Add a fun system health message
+        health_score = (100 - resources['cpu']) * 0.3 + (100 - resources['memory']['percent']) * 0.4 + (100 - resources['disk']['percent']) * 0.3
+        if health_score > 80:
+            health_msg = "🌟 Excellent system health!"
+        elif health_score > 60:
+            health_msg = "👍 Good system performance"
+        elif health_score > 40:
+            health_msg = "⚠️ System under moderate load"
+        else:
+            health_msg = "🚨 Critical system load!"
+            
+        embed.add_field(
+            name="System Health",
+            value=health_msg,
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        print(f"Error in resources_command: {e}")
+        try:
+            await interaction.response.send_message("❌ An error occurred while processing your request.", ephemeral=True)
+        except:
+            pass
+
+@bot.tree.command(name="help", description="ℹ️ Show help message")
+async def help_command(interaction: discord.Interaction):
+    try:
+        embed = discord.Embed(
+            title="✨ Cloud Instance Bot Help",
+            description="Here are all available commands:",
+            color=EMBED_COLOR
+        )
+
+        # Regular user commands
+        commands_list = [  
+            ("📜 `/list`", "List all your instances"),
+            ("📜 `/list-all`", "List all instances on the server (with resource usage)"),
+            ("🟢 `/start <id>`", "Start your instance"),  
+            ("🛑 `/stop <id>`", "Stop your instance"),  
+            ("🔄 `/restart <id>`", "Restart your instance"),  
+            ("🔄 `/regen-ssh <id>`", "Regenerate SSH connection details"),  
+            ("🗑️ `/remove <id>`", "Delete an instance (permanent)"),  
+            ("📊 `/resources`", "Show host system resources"),  
+            ("🏓 `/ping`", "Check bot latency"),  
+            ("ℹ️ `/help`", "Show this help message")
+        ]
+        
+        # Admin commands (if user is admin)
+        if await is_admin(interaction):
+            admin_commands = [
+                ("🚀 `/deploy user: @user os: <os>`", "[ADMIN] Create instance for a user"),
+                ("❌ `/delete-user-container <id>`", "[ADMIN] Force-delete any container")
+            ]
+            commands_list = admin_commands + commands_list
+
+        # Add fields with better formatting
+        for cmd, desc in commands_list:  
+            embed.add_field(
+                name=cmd,
+                value=desc,
+                inline=False
+            )  
+        
+        # Add OS information
+        os_info = "\n".join([f"{os_data['emoji']} **{os_id}** - {os_data['description']}" 
+                            for os_id, os_data in OS_OPTIONS.items()])
+        embed.add_field(
+            name="🖥️ Available Operating Systems",
+            value=os_info,
+            inline=False
+        )
+        
+        embed.set_footer(text=f"💜 Need help? Contact staff!")  
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        print(f"Error in help_command: {e}")
+        try:
+            await interaction.response.send_message("❌ An error occurred while processing your request.", ephemeral=True)
+        except:
+            pass
+
+@bot.tree.command(name="ping", description="🏓 Check bot latency")
+async def ping_command(interaction: discord.Interaction):
+    try:
+        latency = round(bot.latency * 1000)
+        
+        # Determine emoji based on latency
+        if latency < 100:
+            emoji = "⚡"
+            status = "Excellent"
+        elif latency < 300:
+            emoji = "🏓"
+            status = "Good"
+        elif latency < 500:
+            emoji = "🐢"
+            status = "Slow"
+        else:
+            emoji = "🐌"
+            status = "Laggy"
+            
+        embed = discord.Embed(
+            title=f"{emoji} Pong!",
+            description=f"**Bot Latency**: {latency}ms\n**Status**: {status}",
+            color=EMBED_COLOR
+        )
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        print(f"Error in ping_command: {e}")
+        try:
+            await interaction.response.send_message("❌ An error occurred while processing your request.", ephemeral=True)
+        except:
+            pass
+
+bot.run(TOKEN)

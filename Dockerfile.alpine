@@ -1,0 +1,37 @@
+FROM alpine:latest
+
+# Install base packages
+RUN apk add --no-cache \
+    openssh \
+    sudo \
+    shadow \
+    libevent \
+    ncurses \
+    openssl \
+    zlib \
+    wget \
+    tar \
+    xz \
+    python3 && \
+    echo "root:root" | chpasswd && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    mkdir -p /run/sshd && \
+    ssh-keygen -A
+
+# Download and install tmate
+RUN wget https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz -O /tmp/tmate.tar.xz && \
+    mkdir -p /tmp/tmate && \
+    tar -xf /tmp/tmate.tar.xz -C /tmp/tmate --strip-components=1 && \
+    mv /tmp/tmate/tmate /usr/local/bin/ && \
+    chmod +x /usr/local/bin/tmate && \
+    rm -rf /tmp/tmate*
+
+# Install Fake systemctl
+RUN wget -O /usr/bin/systemctl https://raw.githubusercontent.com/gdraheim/docker-systemctl-replacement/master/files/docker/systemctl3.py && \
+    chmod +x /usr/bin/systemctl
+
+# Expose SSH port
+EXPOSE 22
+
+# Start SSHD
+CMD ["/usr/sbin/sshd", "-D"]
